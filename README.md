@@ -16,13 +16,13 @@ git clone https://github.com/thedanielbatinicproject/ADAS.git
 cd ADAS
 ```
 
-Otvori VS Code:
+Otvorite VS Code:
 
 ```bash
 code .
 ```
 
-Kada se VS Code otvori, klikni **"Reopen in Container"** ili:
+Kada se VS Code otvori, kliknite **"Reopen in Container"** ili:
 
 `Ctrl+Shift+P` → **Dev Containers: Reopen in Container**
 
