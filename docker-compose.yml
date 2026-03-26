@@ -4,3 +4,8 @@ services:
     volumes:
       - .:/app
     working_dir: /app
+    environment:
+      - PYTHONPATH=/app/src
+    ports:
+      - "8888:8888"
+    command: sleep infinity

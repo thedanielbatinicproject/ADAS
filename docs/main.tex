@@ -55,7 +55,7 @@
 % paddings
 \usepackage{titlesec}
 \titleformat{\chapter}[hang]{\LARGE\bfseries}{\thechapter.~}{0pt}{}
-\titlespacing*{\chapter}{0pt}{-20pt}{20pt}
+\titlespacing*{\chapter}{0pt}{-40pt}{20pt}
 \titleformat{\section}[hang]{\large\bfseries}{\thesection}{1em}{}
 \titleformat{\subsection}[hang]{\normalsize\bfseries}{\thesubsection}{1em}{}
 
@@ -100,6 +100,8 @@
 % Sažetak (HR)
 \newpage
 \thispagestyle{empty}
+\phantomsection
+\addcontentsline{toc}{chapter}{Sažetak}
 \null\vfill
 \begin{center}
     {\Large\bfseries Sažetak\par}
@@ -110,12 +112,12 @@
     \end{minipage}
 \end{center}
 \vfill\null
-\phantomsection
-\addcontentsline{toc}{chapter}{Sažetak}
 
 % Abstract (EN)
 \newpage
 \thispagestyle{empty}
+\phantomsection
+\addcontentsline{toc}{chapter}{Abstract}
 \null\vfill
 \begin{center}
     {\Large\bfseries Abstract\par}
@@ -126,8 +128,6 @@
     \end{minipage}
 \end{center}
 \vfill\null
-\phantomsection
-\addcontentsline{toc}{chapter}{Abstract}
 
 % Sadržaj
 \newpage

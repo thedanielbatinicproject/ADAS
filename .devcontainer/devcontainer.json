@@ -1,0 +1,20 @@
+{
+  "name": "ADAS Dev Container",
+  "dockerComposeFile": "../docker-compose.yml",
+  "service": "adas",
+  "workspaceFolder": "/app",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "VisualStudioExptTeam.vscodeintellicode",
+        "James-Yu.latex-workshop"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python"
+      }
+    }
+  },
+  "postCreateCommand": "poetry install --no-interaction --no-root --with dev"
+}
