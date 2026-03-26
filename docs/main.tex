@@ -1,0 +1,153 @@
+\documentclass[12pt, a4paper]{report}
+
+% Encoding and language
+\usepackage[utf8]{inputenc}
+\usepackage[croatian]{babel}
+\usepackage[T1]{fontenc}
+
+% Layout
+\usepackage[left=3cm, right=2.5cm, top=2.5cm, bottom=2.5cm]{geometry}
+\usepackage{setspace}
+\onehalfspacing
+
+% Graphics and figures
+\usepackage{graphicx}
+\graphicspath{{figures/}}
+\usepackage{float}
+\usepackage{tikz}
+
+% Math
+\usepackage{amsmath}
+\usepackage{amssymb}
+
+% Tables
+\usepackage{booktabs}
+\usepackage{tabularx}
+
+% Code listings
+\usepackage{listings}
+\usepackage{xcolor}
+
+% References and links
+\usepackage{hyperref}
+\hypersetup{
+    pdftitle={Primjena računalnog vida u sustavima za izbjegavanje sudara kod autonomnih vozila i pametnih sustava asistencije vozaču (ADAS)},
+    pdfauthor={Daniel Batinić},
+    pdfsubject={Završni rad — Fakultet elektrotehnike i računarstva, Sveučilište u Zagrebu},
+    pdfkeywords={ADAS, računalni vid, Canny, detekcija traka, kinematički model, izbjegavanje sudara, autonomna vozila},
+    pdfcreator={LaTeX s MiKTeX distribucijom},
+    pdfproducer={Daniel Batinić, 2026.},
+    colorlinks=true,
+    linkcolor=black,
+    citecolor=black,
+    urlcolor=blue
+}
+\usepackage[backend=biber, style=ieee]{biblatex}
+\addbibresource{references.bib}
+
+% Header/Footer
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\leftmark}
+\cfoot{\thepage}
+
+% paddings
+\usepackage{titlesec}
+\titleformat{\chapter}[hang]{\LARGE\bfseries}{\thechapter.~}{0pt}{}
+\titlespacing*{\chapter}{0pt}{-20pt}{20pt}
+\titleformat{\section}[hang]{\large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}[hang]{\normalsize\bfseries}{\thesubsection}{1em}{}
+
+% -----------------------------------------------
+
+\begin{document}
+
+% Title page
+\begin{titlepage}
+    \begin{tikzpicture}[remember picture, overlay]
+        \node[anchor=south east, xshift=-1cm, yshift=0.5cm, font=\tiny\color{gray}]
+        at (current page.south east) {v1.0};
+    \end{tikzpicture}
+
+    \centering
+    \includegraphics[width=11cm]{figures/FER_logo_3.png}
+
+    \vspace{0.5cm}
+    {\large Sveučilište u Zagrebu\par}
+    {\Large\bfseries Fakultet elektrotehnike i računarstva\par}
+
+    \vspace{1.5cm}
+    {\large Završni rad\par}
+
+    \vspace{2cm}
+    {\LARGE\bfseries Primjena računalnog vida u sustavima za izbjegavanje sudara kod autonomnih vozila i pametnih sustava asistencije vozaču (ADAS)\par}
+
+    \vspace{3cm}
+    \begin{tabular}{ll}
+        \textbf{Autor:}  & Daniel Batinić                   \\[0.5em]
+        \textbf{Mentor:} & izv. prof. dr. sc. Daniel Hofman \\
+    \end{tabular}
+
+    \vfill
+    {\large Zagreb, 2026.\par}
+\end{titlepage}
+
+% Rimski brojevi za prednji dio
+\pagenumbering{roman}
+\setcounter{page}{1}
+
+% Sažetak (HR)
+\newpage
+\thispagestyle{empty}
+\null\vfill
+\begin{center}
+    {\Large\bfseries Sažetak\par}
+    \vspace{1cm}
+    \begin{minipage}{0.6\textwidth}
+
+        Ovdje ide sažetak na hrvatskom jeziku.
+    \end{minipage}
+\end{center}
+\vfill\null
+\phantomsection
+\addcontentsline{toc}{chapter}{Sažetak}
+
+% Abstract (EN)
+\newpage
+\thispagestyle{empty}
+\null\vfill
+\begin{center}
+    {\Large\bfseries Abstract\par}
+    \vspace{1cm}
+    \begin{minipage}{0.6\textwidth}
+
+        Here goes the abstract in English.
+    \end{minipage}
+\end{center}
+\vfill\null
+\phantomsection
+\addcontentsline{toc}{chapter}{Abstract}
+
+% Sadržaj
+\newpage
+\tableofcontents
+
+% Arapski brojevi od prvog poglavlja
+\clearpage
+\pagenumbering{arabic}
+\setcounter{page}{1}
+
+% Chapters
+\input{chapters/01_uvod}
+\input{chapters/02_teorijska_podloga}
+\input{chapters/03_pregled_literature}
+\input{chapters/04_metodologija}
+\input{chapters/05_implementacija}
+\input{chapters/06_testiranje_i_rezultati}
+\input{chapters/07_zakljucak}
+
+% Bibliography
+\printbibliography[heading=bibintoc, title={Literatura}]
+
+\end{document}

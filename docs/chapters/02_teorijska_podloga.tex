@@ -1,0 +1,47 @@
+\chapter{Teorijska podloga}
+
+\section{ADAS sustavi}
+Sustavi asistencije vozaču (ADAS) skup su tehnologija koje pomažu vozaču u upravljanju vozilom povećavajući sigurnost i udobnost vožnje. ADAS sustavi koriste različite senzore poput kamera, radara, lidara i ultrazvučnih senzora kako bi prikupili informacije o okolini vozila. Na temelju tih informacija sustav može upozoriti vozača ili autonomno reagirati.
+
+Moderni ADAS sustavi obuhvaćaju širok spektar funkcionalnosti: od sustava za upozorenje na napuštanje trake (LDW), adaptivnog tempomata (ACC), automatskog kočenja u nuždi (AEB), pa sve do kompleksnih sustava za autonomnu vožnju višeg stupnja. Prema klasifikaciji SAE International, razine autonomije vozila dijele se u pet stupnjeva, od L0 (bez automatizacije) do L5 (potpuna autonomija). Većina trenutno dostupnih komercijalnih ADAS sustava funkcionira na razinama L1 i L2.
+
+Zakonodavni okvir Europske unije sve strože nalaže ugradnju ADAS sustava u nova vozila. Od 2022. godine obavezna je ugradnja sustava za upozorenje na napuštanje trake, automatsko kočenje u nuždi te detekciju umora vozača. Ova regulatorna inicijativa ubrzala je razvoj i implementaciju navedenih tehnologija.
+
+\section{Računalni vid u automobilskim primjenama}
+Računalni vid grana je umjetne inteligencije koja se bavi obradom i razumijevanjem digitalnih slika i videozapisa. U kontekstu ADAS sustava, računalni vid omogućuje detekciju prometnih traka, prepreka, prometnih znakova i pješaka u stvarnom vremenu.
+
+Ključni izazovi računalnog vida u automobilskim primjenama uključuju robusnost na različite uvjete osvjetljenja, promjene vremenskih uvjeta te potrebu za obradom u stvarnom vremenu uz minimalna kašnjenja. Dodatni izazov predstavlja potreba za visokom pouzdanošću sustava s obzirom na sigurnosno kritičnu prirodu primjene.
+
+Postoje dva osnovna pristupa računalnom vidu u ADAS sustavima: klasični deterministički pristup temeljen na matematičkim operacijama obrade slike te moderni pristup temeljen na dubokom učenju. Svaki od njih nosi svoje prednosti i nedostatke ovisno o uvjetima primjene.
+
+\subsection{Klasični pristup}
+Klasični pristup koristi deterministički niz operacija kao što su filtriranje, detekcija rubova i transformacija perspektive. Prednosti su predvidljivost, interpretabilnost i niski računalni zahtjevi. Nedostaci su osjetljivost na promjene u uvjetima osvjetljenja i složenost ručnog podešavanja parametara.
+
+\subsection{Pristup dubokim učenjem}
+Modeli dubokog učenja poput YOLO i SSD arhitektura nude visoku točnost detekcije u raznolikim uvjetima. Međutim, zahtijevaju velike količine anotiranih podataka za treniranje te značajne računalne resurse za izvođenje u stvarnom vremenu.
+
+\section{Klasična obrada slike}
+Za razliku od metoda temeljenih na dubokom učenju, klasična obrada slike koristi deterministički pristup temeljen na matematičkim operacijama. Prednosti ovog pristupa su predvidljivost, interpretabilnost i niži računalni zahtjevi.
+
+U ovom radu koriste se sljedeće metode klasične obrade slike:
+\begin{itemize}
+    \item \textbf{Gaussovo filtriranje} — uklanjanje šuma iz slike
+    \item \textbf{Cannyjeva detekcija rubova} — detekcija granica objekata
+    \item \textbf{Houghova transformacija} — detekcija pravaca i krivulja
+    \item \textbf{Transformacija perspektive} — pretvorba u pogled odozgo (engl. \textit{bird's eye view})
+\end{itemize}
+
+\section{Kinematički model vozila}
+Kinematički model vozila matematički opisuje gibanje vozila bez razmatranja sila koje uzrokuju to gibanje. U kontekstu ovog rada, kinematički model koristi se za procjenu putanje vozila i predviđanje potencijalnih sudara.
+
+Najčešće korišten kinematički model u ADAS primjenama jest model bicikla (engl. \textit{bicycle model}), koji aproksimira četverokotačno vozilo kao jednoosovinski sustav. Ovaj model dovoljna je aproksimacija za scenarije pri nižim brzinama i manjim kutovima upravljača.
+
+Ključni parametri kinematičkog modela su:
+\begin{itemize}
+    \item $v$ — brzina vozila
+    \item $\delta$ — kut upravljača
+    \item $L$ — međuosovinska udaljenost
+    \item $\beta$ — kut klizanja
+\end{itemize}
+
+Na temelju tih parametara moguće je predvidjeti putanju vozila i izračunati tzv. \textit{time-to-collision} (TTC) metriku koja se koristi za procjenu rizika od sudara.
