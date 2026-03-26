@@ -33,3 +33,7 @@ Kada se VS Code otvori, kliknite **"Reopen in Container"** ili:
 - Python 3.12
 - Poetry + sve dependencije iz `pyproject.toml`
 - LaTeX (`texlive-full`)
+
+Detaljnije o projektnim specifikacijama pročitajte [ovdje](/docs/other/ProjectSpecifications.md).
+
+

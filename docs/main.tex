@@ -69,26 +69,26 @@
         \node[anchor=south east, xshift=-1cm, yshift=0.5cm, font=\tiny\color{gray}]
         at (current page.south east) {v1.0};
     \end{tikzpicture}
-
+    
     \centering
     \includegraphics[width=11cm]{figures/FER_logo_3.png}
-
+    
     \vspace{0.5cm}
     {\large Sveučilište u Zagrebu\par}
     {\Large\bfseries Fakultet elektrotehnike i računarstva\par}
-
+    
     \vspace{1.5cm}
     {\large Završni rad\par}
-
+    
     \vspace{2cm}
     {\LARGE\bfseries Primjena računalnog vida u sustavima za izbjegavanje sudara kod autonomnih vozila i pametnih sustava asistencije vozaču (ADAS)\par}
-
+    
     \vspace{3cm}
     \begin{tabular}{ll}
         \textbf{Autor:}  & Daniel Batinić                   \\[0.5em]
         \textbf{Mentor:} & izv. prof. dr. sc. Daniel Hofman \\
     \end{tabular}
-
+    
     \vfill
     {\large Zagreb, 2026.\par}
 \end{titlepage}
@@ -106,9 +106,11 @@
 \begin{center}
     {\Large\bfseries Sažetak\par}
     \vspace{1cm}
-    \begin{minipage}{0.6\textwidth}
-
-        Ovdje ide sažetak na hrvatskom jeziku.
+    \begin{minipage}{0.9\textwidth}
+        Ovaj rad istražuje primjenu računalnog vida u sustavima za izbjegavanje sudara kod autonomnih vozila i pametnih sustava asistencije vozaču (ADAS). Cilj rada je implementirati i evaluirati deterministički pristup detekciji prometnih traka i prepreka korištenjem klasičnih metoda obrade slike.
+        U radu su primijenjene metode filtriranja slike, Cannyjeve detekcije rubova te transformacije perspektive za prepoznavanje prometnih traka i prepreka. Na temelju dobivenih prostornih informacija razvijen je kinematički algoritam koji izračunava vrijeme do sudara (TTC) i na osnovu toga definira odgovarajuću reakciju sustava -- upozorenje vozaču ili automatsko kočenje.
+        Predloženo rješenje testirano je u različitim prometnim uvjetima te je provedena kvantitativna analiza pouzdanosti kroz metrike kao što su preciznost, odziv i F1-score, te analiza performansi u stvarnom vremenu mjerena kroz broj obrađenih slika u sekundi (FPS).
+        Rad zaključuje diskusijom o prednostima i ograničenjima determinističkog pristupa u sustavima aktivne sigurnosti te smjernicama za buduća istraživanja.
     \end{minipage}
 \end{center}
 \vfill\null
@@ -122,9 +124,11 @@
 \begin{center}
     {\Large\bfseries Abstract\par}
     \vspace{1cm}
-    \begin{minipage}{0.6\textwidth}
-
-        Here goes the abstract in English.
+    \begin{minipage}{0.9\textwidth}
+        This paper investigates the application of computer vision in collision avoidance systems for autonomous vehicles and advanced driver assistance systems (ADAS). The primary objective is to implement and evaluate a deterministic approach to lane and obstacle detection through classical image processing techniques.
+        The proposed system employs Gaussian filtering, Canny edge detection, and perspective transformation for lane recognition, alongside geometric methods for obstacle identification. Based on the spatial information derived from these techniques, a kinematic algorithm is developed to compute the Time-to-Collision (TTC) and subsequently determine the appropriate system response -- issuing a driver warning or triggering autonomous emergency braking.
+        The solution is evaluated under a range of traffic conditions, with system reliability assessed through quantitative metrics including precision, recall, and F1-score, complemented by real-time performance analysis measured in frames per second (FPS).
+        The paper concludes with a critical discussion of the advantages and inherent limitations of deterministic methods in active safety systems, alongside directions for future research.
     \end{minipage}
 \end{center}
 \vfill\null
