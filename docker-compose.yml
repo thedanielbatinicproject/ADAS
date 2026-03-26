@@ -9,8 +9,5 @@ services:
     ports:
       - "8888:8888"
     command: sleep infinity
-    deploy:
-      resources:
-        limits:
-          cpus: "4"
-          memory: "8g"
+    cpus: "4"
+    mem_limit: "8g"
