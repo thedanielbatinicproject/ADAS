@@ -13,7 +13,8 @@ dependencies = [
     "pillow (>=12.1.1,<13.0.0)",
     "scikit-image (>=0.26.0,<0.27.0)",
     "scikit-learn (>=1.8.0,<2.0.0)",
-    "dvc (>=3.67.0,<4.0.0)"
+    "dvc[huggingface] (>=3.67.0,<4.0.0)",
+    "huggingface-hub (>=1.8.0,<2.0.0)"
 ]
 
 

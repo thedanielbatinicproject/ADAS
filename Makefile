@@ -1,4 +1,4 @@
-.PHONY: install run test lint format build up down
+.PHONY: install run test lint format build up down setup setup-with-data
 
 install:
 	poetry install
@@ -23,3 +23,10 @@ up:
 
 down:
 	docker compose down
+
+setup:
+	poetry install --with dev
+
+setup-with-data:
+	poetry install --with dev
+	poetry run python scripts/download_dataset.py
