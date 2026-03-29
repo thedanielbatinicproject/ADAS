@@ -4,6 +4,8 @@ import sys
 import time
 from pathlib import Path
 
+#GUIDE: create ".env" file inside scripts folder of a project and create variable in one line like HF_TOKEN=your_token
+
 # ===============================
 # CONFIGURATION
 # ===============================
@@ -19,11 +21,27 @@ RETRY_DELAY = 60                           # seconds between retries
 # ===============================
 def run(cmd, cwd=None):
     """Run a shell command and return output, raise exception on failure."""
-    result = subprocess.run(cmd, shell=True, cwd=cwd,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"Command failed: {cmd}\n{result.stderr}")
-    return result.stdout.strip()
+    print(f"\n[RUN] {cmd}")
+    process = subprocess.Popen(cmd, shell=True, cwd=cwd,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    stdout_lines = []
+    stderr_lines = []
+    # Print output in real time
+    while True:
+        out = process.stdout.readline()
+        err = process.stderr.readline()
+        if out:
+            print(out, end='')
+            stdout_lines.append(out)
+        if err:
+            print(err, end='', file=sys.stderr)
+            stderr_lines.append(err)
+        if out == '' and err == '' and process.poll() is not None:
+            break
+    process.wait()
+    if process.returncode != 0:
+        raise RuntimeError(f"Command failed: {cmd}\n{''.join(stderr_lines)}")
+    return ''.join(stdout_lines).strip()
 
 def get_folder_size_mb(folder):
     """Calculate folder size in MB."""
