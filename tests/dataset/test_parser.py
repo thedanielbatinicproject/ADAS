@@ -1,10 +1,10 @@
 
 import os
+import sys
 import shutil
 import pytest
-from src.adas.dataset import parser
-from tests.assert_colored import assert_colored
-
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
+from adas.dataset import parser
 # Fixture for temp repo in /tests/tmp_test_repo
 tmp_repo_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'tmp_test_repo'))
 
@@ -30,20 +30,18 @@ def test_find_records_image_seq():
     # Act
     records = list(parser.find_records(tmp_repo_path))
     # Assert
-    msg_pass = f"find_records found 1 image_seq with 2 images as expected."
-    msg_fail = f"find_records did not find expected image_seq. Records: {records}"
-    assert_colored(len(records) == 1, msg_pass, msg_fail)
+    assert len(records) == 1, f"Expected 1 image_seq, got: {records}"
     record_id, record_type, path, meta = records[0]
-    assert_colored(record_type == "image_seq", f"record_type is image_seq", f"record_type is {record_type}")
-    assert_colored(meta.get("n_images", 0) == 2, f"n_images is 2", f"n_images is {meta.get('n_images')}")
+    assert record_type == "image_seq", f"Expected record_type 'image_seq', got: {record_type}"
+    assert meta.get("n_images", 0) == 2, f"Expected 2 images, got: {meta.get('n_images')}"
 
 def test__is_image_file():
-    assert_colored(parser._is_image_file("slika.jpg"), "_is_image_file returns True for .jpg", "_is_image_file returns False for .jpg")
-    assert_colored(not parser._is_image_file("video.mp4"), "_is_image_file returns False for .mp4", "_is_image_file returns True for .mp4")
+    assert parser._is_image_file("slika.jpg"), "Should return True for .jpg"
+    assert not parser._is_image_file("video.mp4"), "Should return False for .mp4"
 
 def test__is_video_file():
-    assert_colored(parser._is_video_file("video.mp4"), "_is_video_file returns True for .mp4", "_is_video_file returns False for .mp4")
-    assert_colored(not parser._is_video_file("slika.jpg"), "_is_video_file returns False for .jpg", "_is_video_file returns True for .jpg")
+    assert parser._is_video_file("video.mp4"), "Should return True for .mp4"
+    assert not parser._is_video_file("slika.jpg"), "Should return False for .jpg"
 
 def test_find_records_video():
     # Arrange
@@ -53,12 +51,10 @@ def test_find_records_video():
     # Act
     records = list(parser.find_records(tmp_repo_path))
     # Assert
-    msg_pass = f"find_records found 1 video as expected."
-    msg_fail = f"find_records did not find expected video. Records: {records}"
-    assert_colored(len(records) == 1, msg_pass, msg_fail)
+    assert len(records) == 1, f"Expected 1 video, got: {records}"
     record_id, record_type, path, meta = records[0]
-    assert_colored(record_type == "video", f"record_type is video", f"record_type is {record_type}")
-    assert_colored(path.endswith("test.mp4"), f"path ends with test.mp4", f"path is {path}")
+    assert record_type == "video", f"Expected record_type 'video', got: {record_type}"
+    assert path.endswith("test.mp4"), f"Expected path to end with 'test.mp4', got: {path}"
 
 def test_record_metadata():
     # Arrange
@@ -68,8 +64,8 @@ def test_record_metadata():
     # Act
     meta = parser.record_metadata(tmp_repo_path)
     # Assert
-    assert_colored(meta["n_frames"] == 1, "n_frames is 1", f"n_frames is {meta['n_frames']}")
-    assert_colored(meta["path"].endswith("tmp_test_repo"), "path ends with tmp_test_repo", f"path is {meta['path']}")
+    assert meta["n_frames"] == 1, f"Expected n_frames 1, got: {meta['n_frames']}"
+    assert meta["path"].endswith("tmp_test_repo"), f"Expected path to end with 'tmp_test_repo', got: {meta['path']}"
 
 def test_find_annotation_for_record():
     # Arrange
@@ -79,7 +75,7 @@ def test_find_annotation_for_record():
     # Act
     found = parser.find_annotation_for_record(tmp_repo_path)
     # Assert
-    assert_colored(found and found.endswith("annotations.json"), "Found annotations.json", f"Did not find annotations.json, found: {found}")
+    assert found and found.endswith("annotations.json"), f"Expected to find 'annotations.json', got: {found}"
 
 def test_get_annotation_csv():
     # Arrange
@@ -89,9 +85,9 @@ def test_get_annotation_csv():
     # Act
     ann = parser.get_annotation(tmp_repo_path)
     # Assert
-    assert_colored(isinstance(ann, dict), "get_annotation returns dict for CSV", f"Returned: {ann}")
-    assert_colored("data" in ann, 'Key "data" present in result', f'Result: {ann}')
-    assert_colored(isinstance(ann["data"], list), '"data" is a list', f'data: {ann["data"]}')
-    assert_colored(len(ann["data"]) == 2, 'CSV parsed with 2 rows', f'Rows: {ann["data"]}')
-    assert_colored(ann["data"][0]["id"] == "1" and ann["data"][0]["value"] == "42", 'First row correct', f'Row: {ann["data"][0]}')
-    assert_colored(ann["data"][1]["id"] == "2" and ann["data"][1]["value"] == "43", 'Second row correct', f'Row: {ann["data"][1]}')
+    assert isinstance(ann, dict), f"Expected dict, got: {type(ann)}"
+    assert "data" in ann, f"Expected key 'data' in result, got: {ann}"
+    assert isinstance(ann["data"], list), f"Expected 'data' to be a list, got: {type(ann['data'])}"
+    assert len(ann["data"]) == 2, f"Expected 2 rows in CSV, got: {len(ann['data'])}"
+    assert ann["data"][0]["id"] == "1" and ann["data"][0]["value"] == "42", f"First row incorrect: {ann['data'][0]}"
+    assert ann["data"][1]["id"] == "2" and ann["data"][1]["value"] == "43", f"Second row incorrect: {ann['data'][1]}"
