@@ -57,4 +57,4 @@ def test_get_video_path():
         os.makedirs(d1)
         path = lotvs_reader.get_video_path(tmpdir, "001")
         assert path is not None
-        assert path.endswith(os.path.join("1", "001"))
+        assert os.path.basename(path) == "001"

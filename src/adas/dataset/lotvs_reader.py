@@ -96,12 +96,22 @@ def get_video_path(dataset_root: str, video_id: str) -> Optional[str]:
     """
     Return absolute path to folder/video for the given video_id (recursive search).
     """
+    best_match = None
+    max_depth = -1
     for root, dirs, files in os.walk(dataset_root):
         for d in dirs:
             if d == video_id or d.zfill(3) == video_id or d.zfill(4) == video_id:
-                return os.path.abspath(os.path.join(root, d))
+                full_path = os.path.abspath(os.path.join(root, d))
+                depth = full_path.count(os.sep)
+                if depth > max_depth:
+                    best_match = full_path
+                    max_depth = depth
         for f in files:
             name, ext = os.path.splitext(f)
             if name == video_id or name.zfill(3) == video_id or name.zfill(4) == video_id:
-                return os.path.abspath(os.path.join(root, f))
-    return None
+                full_path = os.path.abspath(os.path.join(root, f))
+                depth = full_path.count(os.sep)
+                if depth > max_depth:
+                    best_match = full_path
+                    max_depth = depth
+    return best_match
