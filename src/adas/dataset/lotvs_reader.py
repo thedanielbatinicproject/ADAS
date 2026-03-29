@@ -19,7 +19,7 @@ def load_annotations(csv_path: str) -> Dict[str, Dict[str, Any]]:
     with open(csv_path, "r", encoding="utf-8", errors="replace") as fh:
         reader = csv.reader(fh, delimiter=";")
         try:
-            header = next(reader)
+            next(reader)
         except StopIteration:
             return {}
         for row in reader:
