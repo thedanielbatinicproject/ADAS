@@ -1,0 +1,18 @@
+# .dockerignore
+data/
+data/raw
+*.mp4
+*.mkv
+*.avi
+*.jpg
+*.jpeg
+*.png
+
+# Git, IDE, venv
+.git
+.vscode
+__pycache__/
+*.pyc
+.venv
+venv
+.env

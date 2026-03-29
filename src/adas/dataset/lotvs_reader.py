@@ -310,4 +310,16 @@ def find_record_by_video_id(dataset_root: str, video_id: str) -> Optional[str]:
             if cc and (cc == video_id or (cc.isdigit() and str(int(cc)) == str(int(video_id)))):
                 p = resolve_record_path(dataset_root, entry)
                 if p:
-                    return**
+                    return p
+    # fallback: try to find by video_id as directory name
+    found = _find_dir_by_name(dataset_root, video_id)
+    if found:
+        return found
+
+    # as last resort, try parser.find_records discovery and match basename
+    for rid, rtype, path, meta in parser.find_records(dataset_root):
+        base = os.path.basename(path)
+        if base == str(video_id) or (video_id.isdigit() and base == str(int(video_id))):
+            return path
+
+    return None
