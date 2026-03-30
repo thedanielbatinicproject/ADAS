@@ -230,16 +230,6 @@ def get_annotation(path_or_record_id: str) -> Optional[Dict]:
     p = find_annotation_for_record(path_or_record_id)
     if not p:
         return None
-    if p.lower().endswith(".csv"):
-        import csv
-        try:
-            with open(p, "r", encoding="utf-8") as fh:
-                reader = csv.DictReader(fh, delimiter=';')
-                rows = list(reader)
-            return {"annotation_path": p, "data": rows}
-        except Exception as e:
-            logger.warning("get_annotation: failed to parse csv %s : %s", p, e)
-            return {"annotation_path": p}
     if p.lower().endswith(".json"):
         try:
             with open(p, "r", encoding="utf-8") as fh:
@@ -247,7 +237,7 @@ def get_annotation(path_or_record_id: str) -> Optional[Dict]:
         except Exception as e:
             logger.warning("get_annotation: failed to parse json %s : %s", p, e)
             return {"annotation_path": p}
-    # Other types: return path for now
+    # CSV or other types: return path for now
     return {"annotation_path": p}
 
 
@@ -308,13 +298,6 @@ def infer_framerate(path: str) -> Optional[float]:
             if not cap.isOpened():
                 cap.release()
                 return None
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            cap.release()
-            if fps and fps > 1e-3:
-                return float(fps)
-            else:
-                return None
-        except Exception as e:
-            logger.warning("infer_framerate: failed to get FPS for %s: %s", path, e)
+            fps = cap.get
+        finally:
             return None
-    return None
