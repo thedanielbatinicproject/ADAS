@@ -23,6 +23,7 @@ API (high level)
 - record_metadata(record_path) -> dict with category, folder, cc, n_frames
 - infer_framerate(path) -> fps or None
 """
+
 from __future__ import annotations
 
 import os
@@ -89,13 +90,20 @@ def find_records(root: str) -> Generator[Tuple[str, str, str, Dict], None, None]
                     break
         if n_imgs > 0:
             rid = os.path.relpath(dirpath, root)
-            yield (rid, "image_seq", dirpath, {"n_images": len([f for f in filenames if _is_image_file(f)])})
+            yield (
+                rid,
+                "image_seq",
+                dirpath,
+                {"n_images": len([f for f in filenames if _is_image_file(f)])},
+            )
         # continue walking - don't special-case depth
 
     # Nothing else to do; function ends
 
 
-def iter_frames(record_path: str, n_frames_hint: Optional[int] = None) -> Generator[Tuple[int, str], None, None]:
+def iter_frames(
+    record_path: str, n_frames_hint: Optional[int] = None
+) -> Generator[Tuple[int, str], None, None]:
     """
     Lazily iterate frames for a given record_path.
 
@@ -123,7 +131,10 @@ def iter_frames(record_path: str, n_frames_hint: Optional[int] = None) -> Genera
         try:
             import cv2  # local import to avoid heavy dependency at module import time
         except Exception:
-            logger.error("iter_frames: cv2 not available to read video frames for %s", record_path)
+            logger.error(
+                "iter_frames: cv2 not available to read video frames for %s",
+                record_path,
+            )
             return
         cap = cv2.VideoCapture(record_path)
         if not cap.isOpened():
@@ -237,11 +248,24 @@ def get_annotation(path_or_record_id: str) -> Optional[Dict]:
         except Exception as e:
             logger.warning("get_annotation: failed to parse json %s : %s", p, e)
             return {"annotation_path": p}
-    # CSV or other types: return path for now
+    if p.lower().endswith(".csv"):
+        import csv
+
+        data = []
+        try:
+            with open(p, "r", encoding="utf-8") as fh:
+                reader = csv.DictReader(fh, delimiter=";")
+                for row in reader:
+                    data.append(dict(row))
+            return {"annotation_path": p, "data": data}
+        except Exception as e:
+            logger.warning("get_annotation: failed to parse csv %s : %s", p, e)
+            return {"annotation_path": p}
+    # Other types: return path for now
     return {"annotation_path": p}
 
 
-def record_metadata(record_path: str) -> Dict:
+def record_metadata(record_path: str, dataset_root: str = None) -> Dict:
     """
     Best-effort metadata for a record_path.
 
@@ -264,6 +288,7 @@ def record_metadata(record_path: str) -> Dict:
     elif os.path.isfile(record_path) and _is_video_file(record_path):
         try:
             import cv2
+
             cap = cv2.VideoCapture(record_path)
             if cap.isOpened():
                 total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
@@ -272,16 +297,33 @@ def record_metadata(record_path: str) -> Dict:
         except Exception:
             meta["n_frames"] = 0
 
-    # parse path components for category/folder/cc when possible
-    parts = record_path.split(os.sep)
-    if len(parts) >= 3:
-        meta["cc"] = parts[-1]
-        meta["folder"] = parts[-2]
-        meta["category"] = parts[-3]
+    # Odredi category kao prvi poddirektorij relativno na dataset_root
+    if dataset_root is not None:
+        try:
+            rel = os.path.relpath(record_path, dataset_root)
+            rel_parts = rel.split(os.sep)
+            meta["category"] = rel_parts[0] if len(rel_parts) > 1 else None
+            meta["folder"] = rel_parts[1] if len(rel_parts) > 2 else None
+            meta["cc"] = (
+                rel_parts[2]
+                if len(rel_parts) > 3
+                else rel_parts[-1] if rel_parts else None
+            )
+        except Exception:
+            meta["category"] = None
+            meta["folder"] = None
+            meta["cc"] = None
     else:
-        meta["cc"] = parts[-1] if parts else None
-        meta["folder"] = None
-        meta["category"] = None
+        # fallback heuristika
+        parts = record_path.split(os.sep)
+        if len(parts) >= 3:
+            meta["category"] = parts[-3]
+            meta["folder"] = parts[-2]
+            meta["cc"] = parts[-1]
+        else:
+            meta["category"] = None
+            meta["folder"] = None
+            meta["cc"] = parts[-1] if parts else None
 
     return meta
 
@@ -294,10 +336,10 @@ def infer_framerate(path: str) -> Optional[float]:
     if os.path.isfile(path) and _is_video_file(path):
         try:
             import cv2
+
             cap = cv2.VideoCapture(path)
             if not cap.isOpened():
                 cap.release()
                 return None
-            fps = cap.get
         finally:
             return None
