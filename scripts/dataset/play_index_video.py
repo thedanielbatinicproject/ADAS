@@ -24,6 +24,21 @@ try:
 except ImportError:
     cv2 = None  # type: ignore[assignment]
 
+# GPU backend detection (runs once at import)
+_USE_CUDA = False
+_HAS_OPENCL = False
+if cv2 is not None:
+    try:
+        _USE_CUDA = cv2.cuda.getCudaEnabledDeviceCount() > 0
+    except Exception:
+        _USE_CUDA = False
+    try:
+        _HAS_OPENCL = cv2.ocl.haveOpenCL()
+        if _HAS_OPENCL:
+            cv2.ocl.setUseOpenCL(True)
+    except Exception:
+        _HAS_OPENCL = False
+
 C_RESET = "\033[0m"
 C_RED = "\033[31m"
 C_GREEN = "\033[32m"
@@ -34,6 +49,31 @@ C_MAGENTA = "\033[35m"
 
 def ctext(text: str, color: str) -> str:
     return f"{color}{text}{C_RESET}"
+
+
+def _resize_for_display(frame: np.ndarray, max_w: int) -> np.ndarray:
+    """Scale frame down to max_w if wider, using CUDA > OpenCL > CPU."""
+    h, w = frame.shape[:2]
+    if w <= max_w:
+        return frame
+    new_w = max_w
+    new_h = int(h * max_w / w)
+    if _USE_CUDA:
+        try:
+            gpu = cv2.cuda_GpuMat()
+            gpu.upload(frame)
+            gpu = cv2.cuda.resize(gpu, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            return gpu.download()
+        except Exception:
+            pass
+    if _HAS_OPENCL:
+        try:
+            umat = cv2.UMat(frame)
+            resized = cv2.resize(umat, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            return resized.get()  # type: ignore[union-attr]
+        except Exception:
+            pass
+    return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
 
 def get_records_by_key(index_path: str, category_id: int, video_id: int) -> List[Dict[str, Any]]:
@@ -216,6 +256,8 @@ def main() -> int:
     p.add_argument("--delay-ms", type=int, default=30, help="Delay between frames in ms (0 = manual step)")
     p.add_argument("--record-type", default="images", help="Which subfolder to play (default: images)")
     p.add_argument("--window-name", default="DADA2000 Player", help="OpenCV window name")
+    p.add_argument("--max-width", type=int, default=1280,
+                   help="Max display width in pixels; frames wider than this are scaled down (default: 1280)")
     args = p.parse_args()
 
     if cv2 is None:
@@ -247,11 +289,13 @@ def main() -> int:
     total = len(frame_refs)
     print(ctext(f"[INFO] {total} frames found. Starting playback...", C_GREEN), flush=True)
 
+    gpu_info = "CUDA" if _USE_CUDA else ("OpenCL" if _HAS_OPENCL else "CPU")
+    print(ctext(f"[INFO] GPU backend: {gpu_info}  max_display_width={args.max_width}", C_GREEN), flush=True)
+
     WIN = args.window_name
     cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
-    default_w = 1000
-    default_h = int(default_w * 9 / 16) + _CTRL_H
-    cv2.resizeWindow(WIN, default_w, default_h)
+    init_w = min(args.max_width, 1280)
+    cv2.resizeWindow(WIN, init_w, int(init_w * 9 / 16) + _CTRL_H)
 
     # Shared mutable state for trackbar/mouse callbacks
     _st: Dict[str, Any] = {
@@ -291,6 +335,10 @@ def main() -> int:
     shown = 0
     start = time.time()
     _resized_to_frame = False
+    _canvas: Optional[np.ndarray] = None   # pre-allocated display buffer
+    _ctrl_cache: Optional[np.ndarray] = None
+    _ctrl_key = (False, -1)                # (paused, pos) — invalidate cache when changed
+    _next_frame_t = time.perf_counter()    # wall-clock deadline for next frame
 
     while True:
         # Apply pending seeks/toggles from callbacks
@@ -312,6 +360,7 @@ def main() -> int:
                 pos = min(total - 1, pos + 1)
             continue
 
+        frame = _resize_for_display(frame, args.max_width)
         h, w = frame.shape[:2]
         _st["fh"] = h
         _st["fw"] = w
@@ -319,12 +368,21 @@ def main() -> int:
         if not _resized_to_frame:
             cv2.resizeWindow(WIN, w, h + _CTRL_H)
             _resized_to_frame = True
+            _canvas = np.empty((h + _CTRL_H, w, 3), dtype=np.uint8)
 
         lbl = frame_label(idx, annotation)
         _put_overlay(frame, args.category_id, args.video_id, pos, total, lbl, paused)
 
-        controls = _draw_controls(w, paused, pos, total)
-        cv2.imshow(WIN, np.vstack([frame, controls]))
+        # Reuse pre-allocated canvas; only redraw controls when state changed
+        if _canvas is None or _canvas.shape[1] != w:
+            _canvas = np.empty((h + _CTRL_H, w, 3), dtype=np.uint8)
+        _canvas[:h] = frame
+        ck = (paused, pos)
+        if ck != _ctrl_key or _ctrl_cache is None:
+            _ctrl_cache = _draw_controls(w, paused, pos, total)
+            _ctrl_key = ck
+        _canvas[h:] = _ctrl_cache
+        cv2.imshow(WIN, _canvas)
 
         # Sync trackbar position (guard against re-triggering callback)
         current_tb = cv2.getTrackbarPos("Frame", WIN)
@@ -335,8 +393,18 @@ def main() -> int:
 
         shown += 1
 
-        wait = 1 if paused or args.delay_ms == 0 else max(args.delay_ms, 1)
-        key = cv2.waitKey(wait) & 0xFF
+        # Use waitKey(1) so the X11/Qt event loop stays responsive.
+        # Sleep the remainder of the frame budget manually to hit the target FPS.
+        key = cv2.waitKey(1) & 0xFF
+        if not paused and args.delay_ms > 0:
+            now = time.perf_counter()
+            sleep_s = _next_frame_t - now
+            if sleep_s > 0:
+                time.sleep(sleep_s)
+            # Schedule next frame; if we're behind, skip ahead to catch up
+            _next_frame_t = max(time.perf_counter(), _next_frame_t + args.delay_ms / 1000.0)
+        else:
+            _next_frame_t = time.perf_counter()
 
         if cv2.getWindowProperty(WIN, cv2.WND_PROP_VISIBLE) < 1:
             break
