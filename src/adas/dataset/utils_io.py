@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Iterable, List, Mapping, Sequence
+from typing import List, Mapping, Sequence
 
 
 def normalize_path(path: str) -> str:

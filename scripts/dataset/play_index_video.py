@@ -249,6 +249,9 @@ def main() -> int:
 
     WIN = args.window_name
     cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
+    default_w = 1000
+    default_h = int(default_w * 9 / 16) + _CTRL_H
+    cv2.resizeWindow(WIN, default_w, default_h)
 
     # Shared mutable state for trackbar/mouse callbacks
     _st: Dict[str, Any] = {
@@ -287,6 +290,7 @@ def main() -> int:
     paused = False
     shown = 0
     start = time.time()
+    _resized_to_frame = False
 
     while True:
         # Apply pending seeks/toggles from callbacks
@@ -311,6 +315,10 @@ def main() -> int:
         h, w = frame.shape[:2]
         _st["fh"] = h
         _st["fw"] = w
+
+        if not _resized_to_frame:
+            cv2.resizeWindow(WIN, w, h + _CTRL_H)
+            _resized_to_frame = True
 
         lbl = frame_label(idx, annotation)
         _put_overlay(frame, args.category_id, args.video_id, pos, total, lbl, paused)

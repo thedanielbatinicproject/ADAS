@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import random
 from collections import defaultdict
-from typing import Callable, Dict, Iterable, List, Sequence, TypeVar
+from typing import Callable, Dict, List, Sequence, TypeVar
 
 T = TypeVar("T")
 
