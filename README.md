@@ -36,4 +36,6 @@ Kada se VS Code otvori, kliknite **"Reopen in Container"** ili:
 
 Detaljnije o projektnim specifikacijama pročitajte [ovdje](/docs/other/ProjectSpecifications.md).
 
+Opis lokalne indeksirane baze (records + annotations), svih stupaca i primjera poziva dostupan je u [docs/other/IndexDatabase.md](docs/other/IndexDatabase.md).
+
 

@@ -280,10 +280,17 @@ def record_metadata(record_path: str, dataset_root: str = None) -> Dict:
     meta["n_frames"] = 0
 
     if os.path.isdir(record_path):
-        # count image files (cheap-ish, required to know length)
+        # Fast path for large datasets: count image files without sorting.
         cnt = 0
-        for _ in iter_frames(record_path):
-            cnt += 1
+        try:
+            with os.scandir(record_path) as entries:
+                for entry in entries:
+                    if entry.is_file() and _is_image_file(entry.name):
+                        cnt += 1
+        except Exception:
+            # Fallback to robust iterator if scandir fails.
+            for _ in iter_frames(record_path):
+                cnt += 1
         meta["n_frames"] = cnt
     elif os.path.isfile(record_path) and _is_video_file(record_path):
         try:
