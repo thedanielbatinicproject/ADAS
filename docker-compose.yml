@@ -3,9 +3,12 @@ services:
     build: .
     volumes:
       - .:/app
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
     working_dir: /app
     environment:
       - PYTHONPATH=/app/src
+      - DISPLAY=${DISPLAY}
+      - QT_QPA_PLATFORM=xcb
     ports:
       - "8888:8888"
     command: sleep infinity

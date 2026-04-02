@@ -38,4 +38,33 @@ Detaljnije o projektnim specifikacijama pročitajte [ovdje](/docs/other/ProjectS
 
 Opis lokalne indeksirane baze (records + annotations), svih stupaca i primjera poziva dostupan je u [docs/other/IndexDatabase.md](docs/other/IndexDatabase.md).
 
+## Opcionalno: GUI Playback u Dockeru (Windows Host)
+
+Ovaj korak je opcionalan i potreban je samo ako želite otvoriti player prozor iz dev containera (OpenCV `imshow`).
+
+1. Instalirajte i pokrenite **VcXsrv** na Windows hostu (XLaunch):
+	- `Multiple windows`
+	- `Start no client`
+	- `Disable access control` (za početni test)
+
+2. U `docker-compose.yml` koristite ove varijable za servis:
+	- `DISPLAY=host.docker.internal:0.0`
+	- `QT_QPA_PLATFORM=xcb`
+	- `QT_X11_NO_MITSHM=1`
+
+3. Rebuildajte dev container:
+	- VS Code: `Dev Containers: Rebuild and Reopen in Container`
+
+4. Pokrenite player unutar containera:
+
+```bash
+python scripts/dataset/play_index_video.py \
+  --index-path data/processed/index.db \
+  --category-id 1 \
+  --video-id 1 \
+  --delay-ms 33
+```
+
+Ako se GUI ne otvori, provjerite da je VcXsrv pokrenut i da je firewall dopustio pristup.
+
 

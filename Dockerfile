@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y \
     libsm6 \
     libxext6 \
     libxrender1 \
+    libxkbcommon-x11-0 \
+    libxcb-xinerama0 \
     texlive-full \
     && rm -rf /var/lib/apt/lists/*
 
