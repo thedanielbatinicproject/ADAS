@@ -51,29 +51,34 @@ def ctext(text: str, color: str) -> str:
     return f"{color}{text}{C_RESET}"
 
 
-def _resize_for_display(frame: np.ndarray, max_w: int) -> np.ndarray:
-    """Scale frame down to max_w if wider, using CUDA > OpenCL > CPU."""
-    h, w = frame.shape[:2]
-    if w <= max_w:
-        return frame
-    new_w = max_w
-    new_h = int(h * max_w / w)
+def _gpu_resize(img: np.ndarray, new_w: int, new_h: int) -> np.ndarray:
+    """Resize to (new_w, new_h) using CUDA > OpenCL > CPU."""
+    if img.shape[1] == new_w and img.shape[0] == new_h:
+        return img
     if _USE_CUDA:
         try:
-            gpu = cv2.cuda_GpuMat()
-            gpu.upload(frame)
-            gpu = cv2.cuda.resize(gpu, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-            return gpu.download()
+            g = cv2.cuda_GpuMat()
+            g.upload(img)
+            g = cv2.cuda.resize(g, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            return g.download()
         except Exception:
             pass
     if _HAS_OPENCL:
         try:
-            umat = cv2.UMat(frame)
-            resized = cv2.resize(umat, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-            return resized.get()  # type: ignore[union-attr]
+            u = cv2.UMat(img)
+            r = cv2.resize(u, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            return r.get()  # type: ignore[union-attr]
         except Exception:
             pass
-    return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+
+
+def _resize_for_display(frame: np.ndarray, max_w: int) -> np.ndarray:
+    """Scale frame down to max_w if wider."""
+    h, w = frame.shape[:2]
+    if w <= max_w:
+        return frame
+    return _gpu_resize(frame, max_w, int(h * max_w / w))
 
 
 def get_records_by_key(index_path: str, category_id: int, video_id: int) -> List[Dict[str, Any]]:
@@ -291,6 +296,13 @@ def main() -> int:
 
     gpu_info = "CUDA" if _USE_CUDA else ("OpenCL" if _HAS_OPENCL else "CPU")
     print(ctext(f"[INFO] GPU backend: {gpu_info}  max_display_width={args.max_width}", C_GREEN), flush=True)
+
+    # Suppress Qt bundled-font-dir warnings by pointing to system fonts
+    if not os.environ.get("QT_QPA_FONTDIR"):
+        for _fd in ("/usr/share/fonts", "/usr/share/fonts/truetype"):
+            if os.path.isdir(_fd):
+                os.environ["QT_QPA_FONTDIR"] = _fd
+                break
 
     WIN = args.window_name
     cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
