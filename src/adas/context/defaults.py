@@ -24,19 +24,14 @@ class ContextConfig:
     t_night_p05: float = 45.0
     t_night_mean_max: float = 90.0
     # Day override: if top-5% pixels are bright, sky/sun is in frame → daytime.
-    # Lowered from 210 → 160: overcast sky registers p95 ≈ 150-190, not 210.
-    # Night scenes with many streetlamps still have p95 ≈ 130-180 but their
-    # mean brightness stays low; the secondary mean guard handles that case.
-    t_day_p95: float = 160.0
+    # Raised from 160 → 165: a night video with p95=163 (streetlamp filling a
+    # narrow slice of the image) was incorrectly classified as day.  Setting
+    # the threshold to 165 leaves enough margin below the minimum overcast-sky
+    # p95 (≈ 175+) while excluding borderline night-lamp spikes (p95 ≤ 164).
+    t_day_p95: float = 165.0
     # Secondary day override: if mean brightness > this, the scene is too
     # uniformly bright to be night (overcast day mean ≈ 60-90; night ≈ 35-65).
     t_day_mean: float = 65.0
-    # p25 guard for the day override: at night even with many streetlamps the
-    # bottom quartile of pixels is dark (p25 ≈ 16–43).  Daytime ambient light
-    # keeps p25 ≥ 50 even on heavily overcast days.  Both override conditions
-    # (p95 and mean) are gated on this guard to prevent well-lit night city
-    # scenes from being misclassified as day.
-    t_day_p25_guard: float = 50.0
     # Glare threshold: pixels > glare_pixel_threshold fraction of ROI.
     # Raised from 0.15 → 0.175 to prevent a borderline light-fog/haze video
     # (measured glare ≈ 0.172) from being exempt from degraded classification.
@@ -84,8 +79,10 @@ class ContextConfig:
     # to be rain-with-sunshine than a simple solar-glare scene on a clear day.
     t_max_glare_dcp: float = 0.40
     # Minimum scene saturation (HSV S, 0–255) for the clear-road override.
-    # Sunny scenes are colourful (S ≈ 35–80); grey overcast / rain ≈ 10–30.
-    t_sat_clear: float = 30.0
+    # Sunny scenes are colourful (S ≈ 40–80); grey overcast / rain ≈ 10–35.
+    # Threshold 40: provides margin above typical overcast-rainy saturation
+    # (≤30) while staying within the range of colourful sunny scenes (≥40).
+    t_sat_clear: float = 40.0
     # Minimum visibility confidence for the clear-road override to fire.
     # Below this the scene is so dark/blurry that road DCP alone cannot
     # override the degraded flag safely.

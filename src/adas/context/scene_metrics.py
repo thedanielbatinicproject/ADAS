@@ -166,23 +166,14 @@ def estimate_visibility(
     confidence = _clamp(confidence)
 
     # Night detection:
-    #   Day override fires when the scene is bright enough to be daytime AND
-    #   the bottom-quartile of pixels is also relatively bright (p25 > guard).
-    #   At night, even a well-lit city has a dark background (parked shadow,
-    #   sky, building edges), so p25 stays low (≈ 16–43) while the few bright
-    #   sources (streetlamps, headlights) push p95 and mean upward.
-    #   Daytime ambient light keeps p25 ≥ 50 even on heavily overcast days.
-    #
-    #   Guard strategy: require p25 > t_day_p25_guard (50) before either the
-    #   p95 OR the mean override fires.  This prevents well-lit night city
-    #   scenes (p25 = 43, mean = 138, p95 = 252 from streetlamps) from being
-    #   misclassified as day while keeping overcast-day detection (p25 ≈ 60+).
+    #   Day override (primary)   – p95 very bright  → sky/sun visible → day
+    #   Day override (secondary) – mean high enough  → scene too bright for night
+    #     Overcast day:  mean ≈ 60-90,  p95 ≈ 150-200
+    #     Night + lamps: mean ≈ 35-65,  p95 ≈ 130-180
+    #   Night condition fires only when BOTH day overrides are false.
     is_day_override = (
-        (
-            metrics.brightness_p95 > cfg.t_day_p95
-            or metrics.brightness_mean > cfg.t_day_mean
-        )
-        and metrics.brightness_p25 > cfg.t_day_p25_guard
+        metrics.brightness_p95 > cfg.t_day_p95
+        or metrics.brightness_mean > cfg.t_day_mean
     )
     is_night = (
         not is_day_override
