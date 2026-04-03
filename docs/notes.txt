@@ -1,0 +1,190 @@
+A. ROUTING SCENARIJA STREAMA:
+CILJ
+----
+Napraviti “router” koji automatski bira režim rada (parametre i logiku) ovisno o:
+- vidljivosti / vremenskim uvjetima (kiša, magla, snijeg, noć, odsjaj)
+- dostupnosti i pouzdanosti prometnih traka (ima / nema / slabo vidljive)
+- tipu podloge/ceste (asfalt, mokro, makadam) radi korekcije kočenja (μ-koef.)
+
+Napomena: radimo heurističku procjenu kvalitete scene.
+Router prvenstveno služi da: 
+(1) stabilizira lane/obstacle detekciju, 
+(2) ispravno “degrada” TTC/reakciju kad nema metrike.
+
+
+1) VARIJABLE (FEATURES) KOJE RAČUNAMO IZ SLIKE
+---------------------------------------------
+
+1.1. Kvaliteta slike / vidljivost (globalne metrike)
+- brightness_mean (prosjek luminancije) → noć / pothranjena ekspozicija
+- brightness_p05_p95 (dinamički raspon) ili contrast_std → nizak kontrast = magla / odsjaj
+- blur_laplacian_var (varijanca Laplaciana) → zamućenje / defokus / magla
+- edge_density (udio Canny rubova) → nizak = magla/snijeg; previsok = šum/kiša
+- saturation_mean (HSV S prosjek) → magla često snižava saturaciju
+- glare_score (opcionalno): saturacija + “clipped highlights” (puno pikselā blizu 255)
+
+Izvedene varijable:
+- visibility_confidence (0..1): kombinacija kontrasta, rubova i blura
+- is_night (bool): brightness_mean niska + malo rubova
+- is_degraded (bool): visibility_confidence ispod praga
+
+1.2. Pouzdanost prometnih traka (lane health)
+- lane_found_left, lane_found_right (bool)
+- lane_confidence (0..1): stabilnost kroz N frameova + konzistentna širina trake + paralelnost
+- lane_width_px (u bird’s-eye) i njezina varijanca
+- lane_tracking_stability: koliko se polinomi/linije “tresu” frame-to-frame
+
+Izvedeno:
+- has_lanes (bool): lane_confidence > threshold
+- lanes_degraded (bool): lane_confidence nisko ali rubovi postoje (npr. kiša)
+
+1.3. Tip ceste/podloge (heuristički) — opcionalno / “nice-to-have”
+Cilj: procijeniti je li “loša” podloga (makadam/blato) ili mokro, radi povećanja zaustavne distance.
+
+Heuristike (nesigurne; koristiti kao “probabilistic hint”):
+- texture_roughness: visokofrekventna tekstura u ROI ispred vozila (makadam često “šumi”)
+- color_uniformity: asfalt je često ujednačeniji od makadama
+- specular_highlights: mokro → više odsjaja (više “clipped” ili sjajnih fleka)
+- wheel-spray/rain streaks: teško pouzdano bez AI, ali može biti indikator degraded visibility
+
+Izvedeno:
+- road_surface_hint ∈ {ASPHALT_DRY, ASPHALT_WET, GRAVEL/UNPAVED, UNKNOWN}
+- surface_confidence (0..1)
+
+VAŽNO: ako surface_confidence nisko → NE donositi agresivne odluke, samo fallback.
+
+
+2) REŽIMI RADA (MODES) I ŠTO SE MIJENJA
+---------------------------------------
+
+MODE 1: NORMAL_MARKED (trake OK, vidljivost OK)
+- lane-based corridor + bird’s-eye homography
+- distance u metrima (m/px kalibracija preko lane width)
+- TTC = d / v_rel (tracking objekata u BEV)
+- standardni pragovi za warning/brake
+
+MODE 2: DEGRADED_MARKED (trake postoje ali vidljivost loša: kiša/magla/noć)
+- jači preprocessing (npr. CLAHE / jači blur / prilagođeni Canny pragovi)
+- lane_confidence smanjuje težinu (konzervativnija procjena)
+- TTC i brzine: koristiti smoothing (EMA/Kalman) i veće margine
+- pragovi reakcije konzervativniji (ranije upozorenje)
+
+MODE 3: UNMARKED_GOOD_VIS (nema traka, ali slika OK)
+- nema corridor-a → koristi se fiksni ROI/trapez ispred vozila
+- udaljenosti su heurističke (pixel-space), ili “relative risk” umjesto metara
+- koristi time-to-intersection u pixel-space (objekt raste / ulazi u ROI)
+
+MODE 4: UNMARKED_DEGRADED (nema traka + loša vidljivost)
+- minimalan set: motion-based obstacle warning u ROI
+- izbjegavati tvrde TTC brojke; izdati upozorenje ako objekt brzo “prilazi” (scale change)
+- fallback: “unknown risk” ako je slika preslaba
+
+MODE 5: EMERGENCY_OVERRIDE
+- neovisno o gore navedenom: ako objekt uđe u kritičnu zonu i closing rate visok
+- odmah warning + kočenje prema pravilima
+
+
+3) ROUTER LOGIKA (STATE MACHINE / PRAVILA)
+------------------------------------------
+
+Ulazi:
+- visibility_confidence
+- lane_confidence
+- surface_hint + surface_confidence
+- fps (da stabiliziramo brzine)
+
+Pravila (pseudokod):
+- if lane_confidence > T_lane and visibility_confidence > T_vis:
+    mode = NORMAL_MARKED
+- elif lane_confidence > T_lane_low and visibility_confidence <= T_vis:
+    mode = DEGRADED_MARKED
+- elif lane_confidence <= T_lane_low and visibility_confidence > T_vis:
+    mode = UNMARKED_GOOD_VIS
+- else:
+    mode = UNMARKED_DEGRADED
+
+Emergency override:
+- if critical_object_in_roi and estimated_time_to_impact < T_emergency:
+    mode = EMERGENCY_OVERRIDE
+
+Histereza:
+- promjena moda tek nakon K uzastopnih frameova (da ne “skače”)
+
+
+4) UTJECAJ TIPA CESTE NA KOČENJE (μ i korekcija)
+------------------------------------------------
+
+Osnovno:
+- zaustavni put ~ v^2 / (2 * μ * g)  (plus reaction distance)
+- ako je podloga loša (manji μ) → povećati kočenje ranije ili smanjiti prag TTC
+
+Praktično u sustavu:
+- definirati koeficijent “braking_multiplier”:
+    braking_multiplier = 1.0 (dry asphalt)
+    braking_multiplier = 1.3..1.6 (wet asphalt)  [aproksimacija]
+    braking_multiplier = 1.6..2.2 (gravel/unpaved) [aproksimacija]
+- efekt u logici:
+    effective_ttc_threshold = base_ttc_threshold * braking_multiplier
+  ili
+    required_braking_distance = nominal_distance * braking_multiplier
+
+Napomena za pisanje rada:
+- ovo je model aproksimacije; bez senzora ne možemo točno znati μ
+- evaluirati osjetljivost: kako promjena μ utječe na stopu warning/brake
+
+
+5) PREPROCESSING STRATEGIJE PO UVJETIMA (PARAMETRI)
+----------------------------------------------------
+
+NORMAL:
+- Gaussian blur (mali)
+- Canny: standardni pragovi
+
+DEGRADED:
+- CLAHE na luminanciji (povećanje kontrasta)
+- jači blur za šum (kiša)
+- adaptivni Canny pragovi (ovisno o kontrastu/edge_density)
+
+NIGHT:
+- pojačati brightness (gamma correction)
+- agresivnije denoise
+- oprez s false edges (farovi / refleksije)
+
+6) TODO u kodu:
+
+src/adas/context/
+  __init__.py
+  types.py
+  scene_metrics.py
+  lane_state.py
+  road_surface.py
+  router.py
+  defaults.py
+
+7) KAKO VALIDIRATI (EVALUACIJA)
+-------------------------------
+
+- Test scenariji:
+  - jasno označene trake (dan)
+  - kiša/magla/noć (degraded)
+  - cesta bez traka (unmarked)
+  - objekt ulazi sa strane (cut-in / pedestrian-like)
+
+- Metrike:
+  - precision/recall/F1 za detekciju prepreka u ROI/corridor
+  - lane detection success rate + lane_confidence statistike
+  - FPS
+  - stabilnost moda (koliko često prebacuje; cilj: rijetko, uz histerezu)
+
+- Dokumentirati ograničenja:
+  - heuristike vremena/podloge nisu 100% pouzdane
+  - bez senzora brzine i dubine: TTC je aproksimacija (osobito u UNMARKED modovima)
+
+
+8) TERMINOLOGIJA ZA DOKUMENTACIJU
+---------------------------------
+- “Scenario routing” / “mode switching” / “context-aware pipeline”
+- “visibility estimation” (heuristička) umjesto “weather classification”
+- “lane availability” + “confidence”
+- “unmarked road fallback”
+- “friction coefficient μ” i utjecaj na kočenje
