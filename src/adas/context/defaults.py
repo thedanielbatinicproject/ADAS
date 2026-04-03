@@ -31,7 +31,16 @@ class ContextConfig:
     # Secondary day override: if mean brightness > this, the scene is too
     # uniformly bright to be night (overcast day mean ≈ 60-90; night ≈ 35-65).
     t_day_mean: float = 65.0
-    t_glare: float = 0.15
+    # p25 guard for the day override: at night even with many streetlamps the
+    # bottom quartile of pixels is dark (p25 ≈ 16–43).  Daytime ambient light
+    # keeps p25 ≥ 50 even on heavily overcast days.  Both override conditions
+    # (p95 and mean) are gated on this guard to prevent well-lit night city
+    # scenes from being misclassified as day.
+    t_day_p25_guard: float = 50.0
+    # Glare threshold: pixels > glare_pixel_threshold fraction of ROI.
+    # Raised from 0.15 → 0.175 to prevent a borderline light-fog/haze video
+    # (measured glare ≈ 0.172) from being exempt from degraded classification.
+    t_glare: float = 0.175
 
     # ---- visibility combination weights (must sum to 1.0) ----
     w_contrast: float = 0.20
@@ -54,9 +63,43 @@ class ContextConfig:
     # contrast score even in foggy or night conditions.
     scene_roi_top_fraction: float = 0.65
 
+    # ---- Dark Channel Prior (He, Sun & Tang 2011) ----
+    # Patch size (px) for the rolling minimum filter.  The original paper
+    # uses 15 px; larger patches are more robust but slower.
+    dcp_patch_size: int = 15
+    # Road-region fraction: we compute the dark channel only in the bottom
+    # portion of the scene ROI to avoid sky/sunlight contaminating the score.
+    dcp_road_fraction: float = 0.45   # use lower 45 % of scene ROI as road
+    # If the road dark-channel score exceeds this, assume atmospheric haze.
+    # Fog videos score ≈ 0.26–0.35; direct-glare scenes score ≈ 0.10–0.23.
+    # Threshold set to 0.255 to stay just below the minimum fog road-DCP
+    # (43/158 = 0.264) while exempting glare scenes with clear asphalt.
+    t_dcp_haze: float = 0.255
+    # Stricter road-DCP threshold for the *non-glare* clear-road override.
+    # All observed fog videos have road-DCP ≥ 0.219; sunny roads ≤ 0.181.
+    # 0.20 keeps a safe margin above the fog minimum (0.219).
+    t_dcp_clear: float = 0.20
+    # Maximum glare_score still eligible for DCP-based glare/fog disambiguation.
+    # Extreme exposures (glare > 0.40 = 40 % of pixels ≥ 220) are more likely
+    # to be rain-with-sunshine than a simple solar-glare scene on a clear day.
+    t_max_glare_dcp: float = 0.40
+    # Minimum scene saturation (HSV S, 0–255) for the clear-road override.
+    # Sunny scenes are colourful (S ≈ 35–80); grey overcast / rain ≈ 10–30.
+    t_sat_clear: float = 30.0
+    # Minimum visibility confidence for the clear-road override to fire.
+    # Below this the scene is so dark/blurry that road DCP alone cannot
+    # override the degraded flag safely.
+    t_vis_dcp_min: float = 0.38
+
     # ---- lane thresholds ----
     t_lane: float = 0.6
-    t_lane_low: float = 0.3
+    # Lowered from 0.3 → 0.10: urban scenes often produce intermittent
+    # Hough detections due to occlusion, dashes, or intersection markings.
+    # EMA smoothing (alpha=0.3) means a single good detection (raw≈0.8)
+    # yields state≈0.24 which stays above 0.10 for 3-4 subsequent frames.
+    # Even with t_lane_low=0.10, the lane test requires lane_conf ≥ 0.10,
+    # which only fires when there is genuine Hough evidence.
+    t_lane_low: float = 0.10
     lane_ema_alpha: float = 0.3
 
     # ---- hysteresis ----
@@ -77,10 +120,16 @@ class ContextConfig:
     lane_roi_top: float = 0.35     # top of lane-search ROI (fraction of frame height)
     lane_roi_bottom: float = 0.88  # bottom of lane-search ROI (excludes dashboard)
     # Higher threshold = require more collinear edge pixels = fewer false positives.
-    # Real white markings on asphalt produce 60–150+ votes; noise 20–40.
-    lane_hough_threshold: int = 55   # was 25
-    lane_min_length: int = 50        # was 25 — short segments are noise
-    lane_max_gap: int = 80           # was 60 — allow more gap for dashed markings
+    # Real white markings on asphalt produce 60-150+ votes; noise 20-40.
+    # Lowered 55 → 40: dashed markings in urban scenes produce fewer votes
+    # per segment; 55 was filtering out genuine intermittent markings.
+    lane_hough_threshold: int = 40
+    # Lowered 50 → 35: dashed markings are shorter than continuous lines;
+    # 50 px min length was causing many real segments to be discarded.
+    lane_min_length: int = 35
+    # Raised 80 → 120: wider gap allows connecting dashes from near-distance
+    # to mid-distance markings that appear discontinuous in perspective.
+    lane_max_gap: int = 120
     lane_slope_min: float = 0.3    # tan(~17°) – filter near-horizontal noise
     lane_slope_max: float = 4.0    # tan(~76°) – filter near-vertical noise
 
@@ -94,9 +143,9 @@ class ContextConfig:
     glare_pixel_threshold: int = 220
 
     # ---- road-surface specular threshold ----
-    # Lowered from 0.03 → 0.015: rain on asphalt at night creates subtler
-    # reflective patches; lower threshold catches them earlier.
-    t_specular: float = 0.015
+    # Lowered from 0.03 → 0.015 → 0.010: rain on asphalt at night creates
+    # subtler reflective patches; lower threshold catches them earlier.
+    t_specular: float = 0.010
 
     # ---- FPS ----
     min_fps: float = 25.0

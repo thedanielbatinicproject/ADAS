@@ -66,8 +66,8 @@ LIGHT_NIGHT = 2
 # ---------------------------------------------------------------------------
 # Test parameters
 # ---------------------------------------------------------------------------
-SAMPLE_SIZE = 10  # videos per test
-FRAMES_PER_VIDEO = 10  # frames analysed per video
+SAMPLE_SIZE = 30  # videos per test
+FRAMES_PER_VIDEO = 20  # frames analysed per video
 PASS_RATIO = 0.9  # ≥ 90 % = pass
 WARN_RATIO = 0.8  # ≥ 80 % = pass + warning
 # Below WARN_RATIO → assertion failure

@@ -96,6 +96,13 @@ class SceneMetrics:
     edge_density: float = 0.0
     saturation_mean: float = 0.0
     glare_score: float = 0.0
+    # Dark-channel prior score for the road region (lower third of scene ROI).
+    # Based on He, Sun & Tang (2011): in hazy/foggy scenes the dark channel
+    # of any local patch is elevated due to atmospheric light scattering;
+    # in clear scenes (or glare from direct sun) the road surface dark
+    # channel remains low while only the sky strip is bright.
+    # Normalised to [0, 1]; 0 = clear road, 1 = fully haze-saturated.
+    dark_channel_road: float = 0.0
 
 
 @dataclass(frozen=True)

@@ -161,6 +161,69 @@ def route(
     surface = estimate_road_surface(frame, config=cfg)
     brake_mult = braking_multiplier(surface, config=cfg)
 
+    # 3b. Dark-channel disambiguation: solar glare ≠ atmospheric haze.
+    #
+    # When the raw visibility confidence is below t_vis and glare is
+    # detected, two fundamentally different conditions produce the same
+    # optical symptoms:
+    #
+    #   (a) Solar glare (sun in lens) – camera overloaded, road itself clear.
+    #       Dark Channel Prior on road region stays LOW (asphalt is dark).
+    #       Road surface is DRY.  → is_degraded should be False.
+    #
+    #   (b) Atmospheric haze / fog – road visibility genuinely reduced.
+    #       Road DCP is ELEVATED (all channels raised by scattered airlight).
+    #       Also applies to wet glare (rain puddle reflections): road is WET.
+    #       → is_degraded must remain True.
+    #
+    # We correct is_degraded only when ALL signals agree on solar glare:
+    #   • glare_score > t_glare       (sun visible in sensor)
+    #   • glare_score < t_max_glare_dcp  (cap: extreme exposure ≥ 0.40 is
+    #       more likely rain-with-sunshine than simple solar glare)
+    #   • dark_channel_road < t_dcp_haze  (road itself is dark/clear)
+    #   • road surface NOT wet        (wet reflection would also give low DCP)
+    is_wet = (
+        surface is not None
+        and surface.surface_type == RoadSurfaceType.ASPHALT_WET
+    )
+    if (
+        visibility.is_glare
+        and visibility.is_degraded
+        and metrics.dark_channel_road < cfg.t_dcp_haze
+        and metrics.glare_score < cfg.t_max_glare_dcp
+        and not is_wet
+    ):
+        from dataclasses import replace as _dc_replace
+        visibility = _dc_replace(visibility, is_degraded=False)
+
+    # 3c. Clear-road override: motion blur on high-speed dashcam footage
+    #     reduces Laplacian variance (blur_laplacian_var) and therefore
+    #     suppresses the blur contribution to visibility confidence even on
+    #     perfectly clear sunny days.  This causes borderline-confidence
+    #     clear-day frames to be mis-labelled as "degraded".
+    #
+    # When ALL of the following conditions hold simultaneously:
+    #   • no direct glare (3b handles that case)
+    #   • road DCP < t_dcp_clear (0.20): road is clearly NOT hazy / foggy
+    #       (all observed fog videos have road-DCP ≥ 0.219 > 0.20)
+    #   • scene saturation > t_sat_clear (30): colourful scene (sunny, not
+    #       grey overcast or foggy/rainy grey)
+    #   • visibility.confidence ≥ t_vis_dcp_min (0.38): some minimum
+    #       quality – truly terrible visibility is not cleared
+    #   • road surface NOT wet: protects rainy-with-wet-road cases
+    # → the "degraded" flag is an artifact of blur miscalibration, not
+    #   genuine visibility impairment.  Clear it.
+    if (
+        not visibility.is_glare
+        and visibility.is_degraded
+        and metrics.dark_channel_road < cfg.t_dcp_clear
+        and metrics.saturation_mean > cfg.t_sat_clear
+        and visibility.confidence >= cfg.t_vis_dcp_min
+        and not is_wet
+    ):
+        from dataclasses import replace as _dc_replace
+        visibility = _dc_replace(visibility, is_degraded=False)
+
     # 4. candidate mode (rule-based)
     candidate = _determine_candidate_mode(visibility, lane_state, cfg)
 

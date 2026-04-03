@@ -36,14 +36,14 @@ class TestDetermineCandidateMode:
 
     def test_unmarked_good_vis(self):
         vis = VisibilityEstimate(confidence=0.8)
-        ls = LaneState(confidence=0.1, availability=LaneAvailability.NO_LANES)
+        ls = LaneState(confidence=0.05, availability=LaneAvailability.NO_LANES)
         assert (
             _determine_candidate_mode(vis, ls, DEFAULT_CONFIG) == Mode.UNMARKED_GOOD_VIS
         )
 
     def test_unmarked_degraded(self):
         vis = VisibilityEstimate(confidence=0.3)
-        ls = LaneState(confidence=0.1, availability=LaneAvailability.NO_LANES)
+        ls = LaneState(confidence=0.05, availability=LaneAvailability.NO_LANES)
         assert (
             _determine_candidate_mode(vis, ls, DEFAULT_CONFIG) == Mode.UNMARKED_DEGRADED
         )

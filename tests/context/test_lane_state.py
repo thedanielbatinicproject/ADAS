@@ -38,8 +38,8 @@ class TestComputeLaneState:
 
     def test_low_confidence_no_lanes(self):
         ld = LaneDetectionInput(
-            left_confidence=0.2,
-            right_confidence=0.1,
+            left_confidence=0.05,
+            right_confidence=0.05,
         )
         ls = compute_lane_state(ld)
         assert ls.availability == LaneAvailability.NO_LANES

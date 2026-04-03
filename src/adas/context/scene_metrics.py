@@ -86,6 +86,34 @@ def compute_scene_metrics(
         gray.size, 1
     )
 
+    # ---- Dark Channel Prior (He, Sun & Tang 2011) – road region only ----
+    # The dark channel of a patch is min_{c in RGB} min_{patch}(I_c).
+    # In hazy/foggy conditions, scattered atmospheric light (airlight A)
+    # elevates ALL channels uniformly: even the "darkest" channel in any
+    # local patch becomes bright.  Under direct solar glare the sky/sun disc
+    # registers a very high dark channel, but the road surface keeps a low
+    # dark channel because asphalt, tyre marks, and road paint still contain
+    # genuinely dark pixels in at least one colour channel.
+    #
+    # We compute DCP only for the bottom dcp_road_fraction of the scene ROI
+    # so that sky brightness cannot pollute the road-haze estimate.
+    h_roi = frame.shape[0]
+    road_y1 = int(h_roi * (1.0 - cfg.dcp_road_fraction))
+    road_patch = frame[road_y1:, :]   # lower portion = road surface
+    if road_patch.size > 0:
+        # min across colour channels → shape (h, w)
+        min_c = np.min(road_patch.astype(np.float32), axis=2)
+        # minimum filter over (dcp_patch_size × dcp_patch_size) neighbourhood
+        # cv2.erode with a rectangular kernel is equivalent to a min filter.
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (cfg.dcp_patch_size, cfg.dcp_patch_size),
+        )
+        dark_ch = cv2.erode(min_c, kernel)
+        dark_channel_road = float(np.mean(dark_ch)) / 255.0
+    else:
+        dark_channel_road = 0.0
+
     return SceneMetrics(
         brightness_mean=brightness_mean,
         brightness_p05=brightness_p05,
@@ -96,6 +124,7 @@ def compute_scene_metrics(
         edge_density=edge_density,
         saturation_mean=saturation_mean,
         glare_score=glare_score,
+        dark_channel_road=dark_channel_road,
     )
 
 
@@ -137,14 +166,23 @@ def estimate_visibility(
     confidence = _clamp(confidence)
 
     # Night detection:
-    #   Day override (primary)   – p95 very bright  → sky/sun visible → day
-    #   Day override (secondary) – mean high enough  → scene too bright for night
-    #     Overcast day:  mean ≈ 60-90,  p95 ≈ 150-200
-    #     Night + lamps: mean ≈ 35-65,  p95 ≈ 130-180
-    #   Night condition fires only when BOTH day overrides are false.
+    #   Day override fires when the scene is bright enough to be daytime AND
+    #   the bottom-quartile of pixels is also relatively bright (p25 > guard).
+    #   At night, even a well-lit city has a dark background (parked shadow,
+    #   sky, building edges), so p25 stays low (≈ 16–43) while the few bright
+    #   sources (streetlamps, headlights) push p95 and mean upward.
+    #   Daytime ambient light keeps p25 ≥ 50 even on heavily overcast days.
+    #
+    #   Guard strategy: require p25 > t_day_p25_guard (50) before either the
+    #   p95 OR the mean override fires.  This prevents well-lit night city
+    #   scenes (p25 = 43, mean = 138, p95 = 252 from streetlamps) from being
+    #   misclassified as day while keeping overcast-day detection (p25 ≈ 60+).
     is_day_override = (
-        metrics.brightness_p95 > cfg.t_day_p95
-        or metrics.brightness_mean > cfg.t_day_mean
+        (
+            metrics.brightness_p95 > cfg.t_day_p95
+            or metrics.brightness_mean > cfg.t_day_mean
+        )
+        and metrics.brightness_p25 > cfg.t_day_p25_guard
     )
     is_night = (
         not is_day_override
