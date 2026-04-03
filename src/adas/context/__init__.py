@@ -19,6 +19,8 @@ from .types import (
     LaneAvailability,
     RoadSurfaceType,
     Mode,
+    WeatherCondition,
+    LightCondition,
     SceneMetrics,
     VisibilityEstimate,
     LaneDetectionInput,

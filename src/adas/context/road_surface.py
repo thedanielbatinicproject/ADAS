@@ -24,22 +24,27 @@ def _extract_roi(
     frame: Any,
     roi: Optional[Tuple[int, int, int, int]],
     default_fraction: float,
+    bottom_margin: float = 0.0,
 ) -> Any:
     """Return the region of interest from *frame*.
 
     Parameters
     ----------
     roi : ``(x1, y1, x2, y2)`` or None
-        Explicit ROI.  If *None*, the bottom ``default_fraction`` of the
-        frame is used (this is where the road surface is typically visible
-        in a dashcam perspective).
+        Explicit ROI.  If *None*, the rows between
+        ``h*(1 - default_fraction - bottom_margin)`` and
+        ``h*(1 - bottom_margin)`` are used — this is the road
+        surface visible through the windscreen, excluding the dashboard.
     """
     if roi is not None:
         x1, y1, x2, y2 = roi
         return frame[y1:y2, x1:x2]
     h = frame.shape[0]
-    y_start = int(h * (1.0 - default_fraction))
-    return frame[y_start:, :]
+    y_end = int(h * (1.0 - bottom_margin))
+    y_start = int(h * (1.0 - default_fraction - bottom_margin))
+    y_start = max(y_start, 0)
+    y_end = max(y_end, y_start + 1)
+    return frame[y_start:y_end, :]
 
 
 # -------------------------------------------------------------------- public
@@ -72,7 +77,7 @@ def estimate_road_surface(
     if frame.ndim == 2:
         frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
 
-    region = _extract_roi(frame, roi, cfg.default_roi_fraction)
+    region = _extract_roi(frame, roi, cfg.default_roi_fraction, cfg.road_roi_bottom_margin)
     if region.size == 0:
         return RoadSurfaceHint()
 
@@ -91,23 +96,32 @@ def estimate_road_surface(
     )
 
     # ---- classification ----
+    # Priority: WET (specular highlights) > GRAVEL (high roughness) > DRY (default).
+    # UNKNOWN is reserved only for situations where the ROI gives no usable data.
+    # A smooth road is DRY by default — we only override with positive evidence.
     if specular > cfg.t_specular:
         surface = RoadSurfaceType.ASPHALT_WET
         margin = (specular - cfg.t_specular) / max(cfg.t_specular, 1e-9)
         confidence = min(0.5 + 0.5 * margin, 1.0)
-    elif roughness > cfg.t_roughness and uniformity_std > cfg.t_uniformity:
+    elif roughness > cfg.t_roughness:
         surface = RoadSurfaceType.GRAVEL
         margin_r = (roughness - cfg.t_roughness) / max(cfg.t_roughness, 1e-9)
-        margin_u = (uniformity_std - cfg.t_uniformity) / max(cfg.t_uniformity, 1e-9)
-        confidence = min(0.5 + 0.25 * (margin_r + margin_u), 1.0)
-    elif roughness <= cfg.t_roughness and uniformity_std <= cfg.t_uniformity:
+        confidence = min(0.5 + 0.4 * margin_r, 1.0)
+    else:
+        # Default: smooth surface → dry asphalt.
+        # Confidence scales with how far below roughness threshold we are
+        # (very smooth = very confident dry).
         surface = RoadSurfaceType.ASPHALT_DRY
         margin_r = (cfg.t_roughness - roughness) / max(cfg.t_roughness, 1e-9)
-        margin_u = (cfg.t_uniformity - uniformity_std) / max(cfg.t_uniformity, 1e-9)
-        confidence = min(0.5 + 0.25 * (margin_r + margin_u), 1.0)
-    else:
-        surface = RoadSurfaceType.UNKNOWN
-        confidence = 0.3
+        confidence = min(0.45 + 0.45 * margin_r, 0.90)
+
+    # Confidence cap when ROI is very dark (night / underpass):
+    # hard to distinguish wet from dry without visible specular patterns.
+    roi_brightness = float(np.mean(gray))
+    if roi_brightness < 40.0:
+        confidence = min(confidence, 0.40)
+    elif roi_brightness < 70.0:
+        confidence = min(confidence, 0.65)
 
     return RoadSurfaceHint(surface_type=surface, confidence=confidence)
 

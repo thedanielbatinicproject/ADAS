@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import queue as _queue
 import sqlite3
 import sys
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -41,7 +43,18 @@ from adas.context import (  # noqa: E402
     ContextConfig,
     ContextState,
     Mode,
+    WeatherCondition,
+    LightCondition,
 )
+
+# Suppress Qt bundled-font-dir warnings — must happen before cv2 is imported
+# so Qt's font database is initialised with the correct path.
+import os as _os
+if not _os.environ.get("QT_QPA_FONTDIR"):
+    for _fd in ("/usr/share/fonts", "/usr/share/fonts/truetype"):
+        if _os.path.isdir(_fd):
+            _os.environ["QT_QPA_FONTDIR"] = _fd
+            break
 
 try:
     import cv2
@@ -259,6 +272,20 @@ _BTN_ACTIONS = [
     (">>", "last"),
 ]
 
+# BGR colours for detected weather / light
+_WEATHER_BGR: Dict[WeatherCondition, Tuple[int, int, int]] = {
+    WeatherCondition.CLEAR:   (0, 210, 210),
+    WeatherCondition.GLARE:   (0, 220, 255),
+    WeatherCondition.FOG:     (160, 160, 160),
+    WeatherCondition.RAIN:    (200, 160,  30),
+    WeatherCondition.UNKNOWN: (100, 100, 100),
+}
+_LIGHT_BGR: Dict[LightCondition, Tuple[int, int, int]] = {
+    LightCondition.DAY:     (0, 220, 180),
+    LightCondition.NIGHT:   (180,  80, 200),
+    LightCondition.UNKNOWN: (100, 100, 100),
+}
+
 _MODE_BGR: Dict[Mode, Tuple[int, int, int]] = {
     Mode.NORMAL_MARKED: (0, 200, 0),
     Mode.DEGRADED_MARKED: (0, 200, 200),
@@ -267,7 +294,48 @@ _MODE_BGR: Dict[Mode, Tuple[int, int, int]] = {
     Mode.EMERGENCY_OVERRIDE: (0, 0, 255),
 }
 
-_OVL_H = 160  # height of the context overlay panel
+_OVL_H = 180  # height of the context overlay panel (px at reference width)
+_OVL_REF_W = 1280  # reference canvas width at which fonts are designed
+
+# Divider between context (left) and ground-truth (right) columns [0.0–1.0]
+_OVL_SPLIT = 0.58
+
+# ── Annotation decode tables ────────────────────────────────────────────────
+_ANNOT_WEATHER = {1: "sunny", 2: "rainy", 3: "snowy", 4: "foggy"}
+_ANNOT_LIGHT   = {1: "day",   2: "night"}
+_ANNOT_SCENES  = {1: "highway", 2: "tunnel", 3: "mountain", 4: "urban", 5: "rural"}
+_ANNOT_LINEAR  = {1: "arterials", 2: "curve", 3: "intersection",
+                  4: "T-junction", 5: "ramp"}
+
+# Colours for GT weather/light cells (BGR)
+_GT_WEATHER_CLR: Dict[str, Tuple[int, int, int]] = {
+    "sunny":  (0, 210, 210),
+    "rainy":  (200, 160,  30),
+    "snowy":  (230, 230, 230),
+    "foggy":  (160, 160, 160),
+}
+_GT_LIGHT_CLR: Dict[str, Tuple[int, int, int]] = {
+    "day":   (0, 220, 180),
+    "night": (180,  80, 200),
+}
+
+
+def _annot_summary(annotation: Optional[Dict[str, Any]]) -> List[Tuple[str, str, Tuple[int, int, int]]]:
+    """Return list of (label, value, bgr_color) tuples from a raw annotation dict."""
+    if annotation is None:
+        return [("GT annotations", "not available", (120, 120, 120))]
+    w   = _ANNOT_WEATHER.get(annotation.get("weather"),  "?")
+    lt  = _ANNOT_LIGHT.get(annotation.get("light"),     "?")
+    sc  = _ANNOT_SCENES.get(annotation.get("scenes"),   "?")
+    lin = _ANNOT_LINEAR.get(annotation.get("linear"),   "?")
+    acc = "yes" if annotation.get("accident_occurred") else "no"
+    return [
+        ("Weather", w,   _GT_WEATHER_CLR.get(w, (180, 180, 180))),
+        ("Light",   lt,  _GT_LIGHT_CLR.get(lt, (180, 180, 180))),
+        ("Scene",   sc,  (180, 180, 180)),
+        ("Road",    lin, (180, 180, 180)),
+        ("Accident", acc, (0, 80, 200) if acc == "yes" else (100, 100, 100)),
+    ]
 
 
 # ── GPU helpers ─────────────────────────────────────────────────────────────
@@ -355,136 +423,128 @@ def _draw_context_overlay(
     ctx: Optional[ContextState],
     analysed_frame: Optional[int],
     every_n: int,
+    annotation: Optional[Dict[str, Any]] = None,
 ) -> np.ndarray:
-    """Draw a dark panel with context state details."""
-    panel = np.full((_OVL_H, width, 3), (30, 30, 30), dtype=np.uint8)
+    """Render context panel at _OVL_REF_W then scale to `width`.
+
+    Rendering at a fixed reference width keeps all text at a consistent
+    physical size regardless of the video canvas resolution.
+    """
+    REF = _OVL_REF_W
+    panel = np.full((_OVL_H, REF, 3), (30, 30, 30), dtype=np.uint8)
     font = cv2.FONT_HERSHEY_SIMPLEX
+    LH = 28   # line height in px (at reference width)
+    X0 = 14   # left margin
+
+    def _put(img, txt, x, y, scale, color, thick=1):
+        cv2.putText(img, txt, (x, y), font, scale, (0, 0, 0), thick + 2)
+        cv2.putText(img, txt, (x, y), font, scale, color, thick)
+
+    def _text_w(txt, scale, thick=1):
+        return cv2.getTextSize(txt, font, scale, thick)[0][0]
 
     if ctx is None:
-        cv2.putText(
-            panel,
-            "Context: waiting for first analysis...",
-            (12, 28),
-            font,
-            0.55,
-            (150, 150, 150),
-            1,
-        )
-        cv2.putText(
-            panel,
-            f"(analysing every {every_n} frames)",
-            (12, 52),
-            font,
-            0.45,
-            (120, 120, 120),
-            1,
-        )
-        return panel
+        _put(panel, "Context: waiting for first analysis...",
+             X0, LH, 0.60, (150, 150, 150))
+        _put(panel, f"(analysing every {every_n} frames)",
+             X0, LH * 2, 0.48, (120, 120, 120))
+    else:
+        vis = ctx.visibility
+        lm  = ctx.lane_state
+        rs  = ctx.road_surface
+        sm  = ctx.scene_metrics
+        div_x = int(REF * _OVL_SPLIT)
 
-    vis = ctx.visibility
-    lm = ctx.lane_state
-    rs = ctx.road_surface
-    sm = ctx.scene_metrics
+        # Row 1 — MODE (large, coloured)
+        y1 = LH
+        mode_color = _MODE_BGR.get(ctx.mode, (200, 200, 200))
+        _put(panel, "MODE:", X0, y1, 0.52, (160, 160, 160))
+        x_mode = X0 + _text_w("MODE:", 0.52) + 10
+        _put(panel, ctx.mode.value.upper(), x_mode, y1, 0.72, mode_color, 2)
+        if analysed_frame is not None:
+            tag = f"[ctx @ frame {analysed_frame}]"
+            _put(panel, tag, div_x - _text_w(tag, 0.44) - 8, y1, 0.44, (100, 100, 100))
 
-    # Row 1: mode
-    mode_color = _MODE_BGR.get(ctx.mode, (200, 200, 200))
-    cv2.putText(panel, "MODE:", (12, 24), font, 0.5, (160, 160, 160), 1)
-    cv2.putText(panel, ctx.mode.value.upper(), (70, 24), font, 0.6, mode_color, 2)
-    if analysed_frame is not None:
-        tag = f"[ctx @ frame {analysed_frame}]"
-        cv2.putText(panel, tag, (width - 250, 24), font, 0.45, (120, 120, 120), 1)
+        # Row 2 — Weather  |  Light
+        y2 = y1 + LH
+        wc = ctx.weather_condition
+        lc = ctx.light_condition
+        wc_color = _WEATHER_BGR.get(wc, (180, 180, 180))
+        lc_color = _LIGHT_BGR.get(lc, (180, 180, 180))
+        _put(panel, "Weather:", X0, y2, 0.52, (160, 160, 160))
+        x = X0 + _text_w("Weather:", 0.52) + 10
+        _put(panel, wc.value.upper(), x, y2, 0.62, wc_color, 2)
+        x += _text_w(wc.value.upper(), 0.62) + 30
+        _put(panel, "Light:", x, y2, 0.52, (160, 160, 160))
+        x += _text_w("Light:", 0.52) + 10
+        _put(panel, lc.value.upper(), x, y2, 0.62, lc_color, 2)
 
-    # Row 2: visibility
-    y2 = 50
-    if vis:
-        flags = []
-        if vis.is_night:
-            flags.append("NIGHT")
-        if vis.is_glare:
-            flags.append("GLARE")
-        if vis.is_degraded:
-            flags.append("DEGRADED")
-        flag_str = ", ".join(flags) if flags else "OK"
-        vis_color = (0, 200, 0) if not vis.is_degraded else (0, 140, 220)
-        cv2.putText(panel, "Visibility:", (12, y2), font, 0.45, (160, 160, 160), 1)
-        cv2.putText(panel, f"{vis.confidence:.2f}", (110, y2), font, 0.5, vis_color, 1)
-        cv2.putText(panel, flag_str, (180, y2), font, 0.45, vis_color, 1)
-
-    # Row 3: lane state
-    y3 = 76
-    if lm:
-        lane_color = (
-            (0, 200, 0)
-            if lm.has_lanes
-            else (0, 180, 200) if lm.lanes_degraded else (0, 80, 200)
-        )
-        cv2.putText(panel, "Lanes:", (12, y3), font, 0.45, (160, 160, 160), 1)
-        cv2.putText(
-            panel,
-            f"{lm.availability.value}  conf={lm.confidence:.2f}  stab={lm.stability:.2f}",
-            (72, y3),
-            font,
-            0.45,
-            lane_color,
-            1,
-        )
-        if lm.lane_width_px is not None:
-            cv2.putText(
-                panel,
-                f"w={lm.lane_width_px:.0f}px",
-                (400, y3),
-                font,
-                0.45,
-                lane_color,
-                1,
+        # Row 3 — Lanes  |  Road surface
+        y3 = y2 + LH
+        if lm:
+            lane_color = (
+                (0, 200, 0) if lm.has_lanes
+                else (0, 180, 200) if lm.lanes_degraded
+                else (0, 80, 200)
             )
+            _put(panel, "Lanes:", X0, y3, 0.52, (160, 160, 160))
+            x = X0 + _text_w("Lanes:", 0.52) + 10
+            lane_val = lm.availability.value.replace("_", " ").upper()
+            _put(panel, lane_val, x, y3, 0.58, lane_color, 2)
+            x += _text_w(lane_val, 0.58) + 12
+            _put(panel, f"conf={lm.confidence:.2f}", x, y3, 0.46, (120, 120, 120))
+        if rs:
+            x_road = X0 + int((div_x - X0) * 0.55)
+            _put(panel, "Road:", x_road, y3, 0.52, (160, 160, 160))
+            x = x_road + _text_w("Road:", 0.52) + 10
+            surf_val = rs.surface_type.value.replace("asphalt_", "").upper()
+            surf_color = (0, 160, 220) if rs.surface_type.value == "asphalt_wet" else (180, 180, 180)
+            _put(panel, surf_val, x, y3, 0.58, surf_color, 2)
 
-    # Row 4: road surface + braking
-    y4 = 102
-    if rs:
-        surf_color = (180, 180, 180)
-        cv2.putText(panel, "Surface:", (12, y4), font, 0.45, (160, 160, 160), 1)
-        cv2.putText(
-            panel,
-            f"{rs.surface_type.value}  conf={rs.confidence:.2f}",
-            (90, y4),
-            font,
-            0.45,
-            surf_color,
-            1,
-        )
-        cv2.putText(
-            panel,
-            f"brake x{ctx.braking_multiplier:.2f}",
-            (350, y4),
-            font,
-            0.45,
-            (0, 160, 220),
-            1,
-        )
+        # Row 4 — Visibility confidence  |  Braking multiplier
+        y4 = y3 + LH
+        if vis:
+            vis_color = (0, 200, 0) if not vis.is_degraded else (0, 140, 220)
+            _put(panel, "Visibility:", X0, y4, 0.52, (160, 160, 160))
+            x = X0 + _text_w("Visibility:", 0.52) + 10
+            _put(panel, f"{vis.confidence:.2f}", x, y4, 0.62, vis_color, 2)
+        brake_str = f"Braking:  x{ctx.braking_multiplier:.2f}"
+        brake_color = (0, 80, 220) if ctx.braking_multiplier > 1.0 else (120, 220, 120)
+        x_brake = X0 + int((div_x - X0) * 0.55)
+        _put(panel, brake_str, x_brake, y4, 0.54, brake_color, 1)
 
-    # Row 5: raw metrics
-    y5 = 128
-    if sm:
-        cv2.putText(panel, "Metrics:", (12, y5), font, 0.45, (160, 160, 160), 1)
-        metrics_str = (
-            f"bright={sm.brightness_mean:.0f}  "
-            f"contr={sm.contrast_std:.1f}  "
-            f"blur={sm.blur_laplacian_var:.0f}  "
-            f"edges={sm.edge_density:.3f}  "
-            f"sat={sm.saturation_mean:.0f}  "
-            f"glare={sm.glare_score:.3f}"
-        )
-        cv2.putText(panel, metrics_str, (90, y5), font, 0.4, (140, 140, 140), 1)
+        # Row 5 — Raw metrics + hysteresis (small, dim — secondary info)
+        y5 = y4 + LH
+        if sm:
+            hyst = f"hold={ctx.mode_hold_count}"
+            if ctx.pending_mode is not None:
+                hyst += f" pend={ctx.pending_mode.value}({ctx.pending_count})"
+            metrics_str = (
+                f"bright={sm.brightness_mean:.0f}  contr={sm.contrast_std:.1f}  "
+                f"blur={sm.blur_laplacian_var:.0f}  edges={sm.edge_density:.3f}  "
+                f"sat={sm.saturation_mean:.0f}  glare={sm.glare_score:.3f}  "
+                f"| {hyst}"
+            )
+            _put(panel, metrics_str, X0, y5, 0.40, (90, 90, 90))
 
-    # Row 6: hysteresis
-    y6 = 150
-    hyst_str = f"hold={ctx.mode_hold_count}"
-    if ctx.pending_mode is not None:
-        hyst_str += f"  pending={ctx.pending_mode.value}({ctx.pending_count})"
-    cv2.putText(panel, "Hysteresis:", (12, y6), font, 0.4, (100, 100, 100), 1)
-    cv2.putText(panel, hyst_str, (110, y6), font, 0.4, (100, 100, 100), 1)
+    # ── Right column: ground-truth annotations ──────────────────────────
+    div_x = int(REF * _OVL_SPLIT)
+    cv2.line(panel, (div_x, 6), (div_x, _OVL_H - 6), (70, 70, 70), 1)
+    GX = div_x + 14  # left margin of GT column
 
+    gt_rows = _annot_summary(annotation)
+    _put(panel, "GROUND TRUTH", GX, LH, 0.52, (110, 110, 200), 1)
+    for i, (lbl, val, color) in enumerate(gt_rows):
+        gy = LH + (i + 1) * LH
+        if gy > _OVL_H - 6:
+            break
+        _put(panel, f"{lbl}:", GX, gy, 0.46, (140, 140, 140))
+        vx = GX + _text_w(f"{lbl}:", 0.46) + 8
+        _put(panel, val, vx, gy, 0.54, color, 1)
+
+    # Scale from reference width to actual canvas width (maintains physical text size)
+    if width != REF:
+        panel = cv2.resize(panel, (width, _OVL_H), interpolation=cv2.INTER_LINEAR)
     return panel
 
 
@@ -529,15 +589,40 @@ def _run_gui(
 
     # Context state persists between analysis frames
     cur_ctx: Optional[ContextState] = None
-    prev_ctx: Optional[ContextState] = None
     ctx_frame_idx: Optional[int] = None
 
-    # Suppress Qt font warnings
-    if not os.environ.get("QT_QPA_FONTDIR"):
-        for _fd in ("/usr/share/fonts", "/usr/share/fonts/truetype"):
-            if os.path.isdir(_fd):
-                os.environ["QT_QPA_FONTDIR"] = _fd
+    # ── Worker thread for context analysis ──────────────────────────────
+    # route() takes 30-100 ms (Hough + metrics) — runs on a dedicated thread
+    # so the rendering loop stays at full framerate.
+    _ctx_in_q: "_queue.Queue[Optional[tuple]]" = _queue.Queue(maxsize=1)
+    _ctx_out_q: "_queue.Queue[tuple]" = _queue.Queue(maxsize=4)
+    _ctx_stop = threading.Event()
+
+    def _ctx_worker() -> None:
+        local_prev: Optional[ContextState] = None
+        while not _ctx_stop.is_set():
+            try:
+                task = _ctx_in_q.get(timeout=0.05)
+            except _queue.Empty:
+                continue
+            if task is None:
                 break
+            f, fidx, ts = task
+            state = route(
+                f,
+                timestamp_s=ts,
+                fps=cfg.min_fps,
+                prev_state=local_prev,
+                config=cfg,
+            )
+            local_prev = state
+            try:
+                _ctx_out_q.put_nowait((fidx, state))
+            except _queue.Full:
+                pass  # main thread is slow consuming; drop result
+
+    _worker = threading.Thread(target=_ctx_worker, daemon=True, name="ctx-worker")
+    _worker.start()
 
     WIN = args.window_name
     cv2.namedWindow(WIN, cv2.WINDOW_NORMAL)
@@ -616,19 +701,24 @@ def _run_gui(
             cv2.resizeWindow(WIN, w, h + _OVL_H + _CTRL_H)
             _resized_to_frame = True
 
-        # ── Context analysis on every N-th frame ────────────────────────
+        # ── Submit frame for context analysis (non-blocking) ───────────
+        # Copy before in-place overlay drawing so worker gets clean frame.
         if idx % every_n == 0:
             ts = idx / max(cfg.min_fps, 1.0)
-            cur_ctx = route(
-                frame,
-                timestamp_s=ts,
-                fps=cfg.min_fps,
-                prev_state=prev_ctx,
-                config=cfg,
-            )
-            prev_ctx = cur_ctx
-            ctx_frame_idx = idx
-            _ovl_key = None  # force overlay redraw
+            try:
+                _ctx_in_q.put_nowait((frame.copy(), idx, ts))
+            except _queue.Full:
+                pass  # worker still busy with previous frame; skip
+
+        # ── Collect completed context results (non-blocking) ─────────────
+        try:
+            while True:
+                ctx_fidx, new_ctx = _ctx_out_q.get_nowait()
+                cur_ctx = new_ctx
+                ctx_frame_idx = ctx_fidx
+                _ovl_key = None  # force overlay redraw
+        except _queue.Empty:
+            pass
 
         # ── Draw frame overlay ──────────────────────────────────────────
         lbl = frame_label(idx, annotation)
@@ -645,7 +735,9 @@ def _run_gui(
 
         # Context overlay (redraw only when context changes)
         if _ovl_key != id(cur_ctx):
-            _ovl_cache = _draw_context_overlay(w, cur_ctx, ctx_frame_idx, every_n)
+            _ovl_cache = _draw_context_overlay(
+                w, cur_ctx, ctx_frame_idx, every_n, annotation
+            )
             _ovl_key = id(cur_ctx)
         _canvas[h : h + _OVL_H] = _ovl_cache
 
@@ -679,8 +771,11 @@ def _run_gui(
         else:
             _next_frame_t = time.perf_counter()
 
-        if cv2.getWindowProperty(WIN, cv2.WND_PROP_VISIBLE) < 1:
-            break
+        try:
+            if cv2.getWindowProperty(WIN, cv2.WND_PROP_VISIBLE) < 1:
+                break
+        except cv2.error:
+            break  # window destroyed by OS (X button)
         if key == ord("q"):
             break
         elif key == ord(" "):
@@ -696,6 +791,14 @@ def _run_gui(
             if pos >= total:
                 pos = total - 1
                 paused = True
+
+    # Stop worker thread cleanly
+    _ctx_stop.set()
+    try:
+        _ctx_in_q.put_nowait(None)  # wake worker if blocked on get()
+    except _queue.Full:
+        pass
+    _worker.join(timeout=2.0)
 
     cv2.destroyAllWindows()
     elapsed = max(time.time() - start, 1e-6)

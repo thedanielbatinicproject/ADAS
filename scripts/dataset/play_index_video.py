@@ -19,6 +19,14 @@ if SRC_ROOT not in sys.path:
 
 from adas.dataset import indexer, parser  # noqa: E402
 
+# Suppress Qt bundled-font-dir warnings before cv2 is imported
+import os as _os
+if not _os.environ.get("QT_QPA_FONTDIR"):
+    for _fd in ("/usr/share/fonts", "/usr/share/fonts/truetype"):
+        if _os.path.isdir(_fd):
+            _os.environ["QT_QPA_FONTDIR"] = _fd
+            break
+
 try:
     import cv2
 except ImportError:
@@ -418,8 +426,11 @@ def main() -> int:
         else:
             _next_frame_t = time.perf_counter()
 
-        if cv2.getWindowProperty(WIN, cv2.WND_PROP_VISIBLE) < 1:
-            break
+        try:
+            if cv2.getWindowProperty(WIN, cv2.WND_PROP_VISIBLE) < 1:
+                break
+        except cv2.error:
+            break  # window destroyed by OS (X button)
         if key == ord("q"):
             break
         elif key == ord(" "):

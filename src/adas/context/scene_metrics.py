@@ -70,6 +70,7 @@ def compute_scene_metrics(
 
     brightness_mean = float(np.mean(gray))
     brightness_p05 = float(np.percentile(gray, 5))
+    brightness_p25 = float(np.percentile(gray, 25))
     brightness_p95 = float(np.percentile(gray, 95))
     contrast_std = float(np.std(gray))
 
@@ -88,6 +89,7 @@ def compute_scene_metrics(
     return SceneMetrics(
         brightness_mean=brightness_mean,
         brightness_p05=brightness_p05,
+        brightness_p25=brightness_p25,
         brightness_p95=brightness_p95,
         contrast_std=contrast_std,
         blur_laplacian_var=blur_laplacian_var,
@@ -134,9 +136,25 @@ def estimate_visibility(
     )
     confidence = _clamp(confidence)
 
+    # Night detection:
+    #   Day override (primary)   – p95 very bright  → sky/sun visible → day
+    #   Day override (secondary) – mean high enough  → scene too bright for night
+    #     Overcast day:  mean ≈ 60-90,  p95 ≈ 150-200
+    #     Night + lamps: mean ≈ 35-65,  p95 ≈ 130-180
+    #   Night condition fires only when BOTH day overrides are false.
+    is_day_override = (
+        metrics.brightness_p95 > cfg.t_day_p95
+        or metrics.brightness_mean > cfg.t_day_mean
+    )
     is_night = (
-        metrics.brightness_mean < cfg.t_night_brightness
-        and metrics.edge_density < cfg.t_night_edge_density
+        not is_day_override
+        and (
+            metrics.brightness_p25 < cfg.t_night_p25
+            or (
+                metrics.brightness_p05 < cfg.t_night_p05
+                and metrics.brightness_mean < cfg.t_night_mean_max
+            )
+        )
     )
     is_degraded = confidence < cfg.t_vis
     is_glare = metrics.glare_score > cfg.t_glare

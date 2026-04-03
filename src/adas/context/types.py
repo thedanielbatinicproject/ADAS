@@ -38,6 +38,31 @@ class RoadSurfaceType(enum.Enum):
     UNKNOWN = "unknown"
 
 
+class WeatherCondition(enum.Enum):
+    """Heuristic weather classification derived from scene metrics.
+
+    CLEAR   - good visibility, no precipitation cues
+    GLARE   - overexposed / strong backlight
+    FOG     – degraded visibility, no wet-surface cue
+    RAIN    – degraded visibility with wet-surface indicator
+    UNKNOWN – insufficient data
+    """
+
+    CLEAR = "clear"
+    GLARE = "glare"
+    FOG = "fog"
+    RAIN = "rain"
+    UNKNOWN = "unknown"
+
+
+class LightCondition(enum.Enum):
+    """Ambient light level."""
+
+    DAY = "day"
+    NIGHT = "night"
+    UNKNOWN = "unknown"
+
+
 class Mode(enum.Enum):
     """System operating mode determined by the context router.
 
@@ -64,6 +89,7 @@ class SceneMetrics:
 
     brightness_mean: float = 0.0
     brightness_p05: float = 0.0
+    brightness_p25: float = 0.0   # 25th percentile: >75% of pixels below this → night
     brightness_p95: float = 0.0
     contrast_std: float = 0.0
     blur_laplacian_var: float = 0.0
@@ -142,6 +168,10 @@ class ContextState:
     braking_multiplier: float = 1.0
     timestamp_s: float = 0.0
     fps: Optional[float] = None
+
+    # --- derived high-level conditions ---
+    weather_condition: WeatherCondition = WeatherCondition.UNKNOWN
+    light_condition: LightCondition = LightCondition.UNKNOWN
 
     # --- hysteresis bookkeeping (carried between frames) ---
     mode_hold_count: int = 0

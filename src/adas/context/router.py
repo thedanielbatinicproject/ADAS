@@ -21,14 +21,53 @@ from .types import (
     EmergencySignal,
     VisibilityEstimate,
     LaneState,
+    RoadSurfaceType,
+    WeatherCondition,
+    LightCondition,
 )
 from .scene_metrics import compute_scene_metrics, estimate_visibility
 from .lane_state import compute_lane_state
 from .road_surface import estimate_road_surface, braking_multiplier
 from .defaults import ContextConfig, DEFAULT_CONFIG
 
+# Import Hough lane detector (optional – graceful fallback if cv2 not present)
+try:
+    from .lane_heuristic import detect_lanes_heuristic as _detect_lanes_hough
+except Exception:  # pragma: no cover
+    _detect_lanes_hough = None  # type: ignore[assignment]
+
 
 # ------------------------------------------------------------------ internal
+
+
+def _derive_conditions(
+    visibility: VisibilityEstimate,
+    surface: "RoadSurfaceType | None",
+) -> tuple[WeatherCondition, LightCondition]:
+    """Map low-level visibility/surface signals to human-readable conditions.
+
+    Light condition (day/night) is determined independently of weather.
+    Weather describes precipitation / visibility quality, not time of day:
+
+    Glare:  is_glare → GLARE
+    Rain:   is_degraded + wet surface → RAIN
+    Fog:    is_degraded, not wet, not glare → FOG
+    Clear:  not degraded, not glare → CLEAR  (holds at night too)
+    """
+    light = LightCondition.NIGHT if visibility.is_night else LightCondition.DAY
+
+    if visibility.is_glare:
+        weather = WeatherCondition.GLARE
+    elif visibility.is_degraded:
+        is_wet = (
+            surface is not None
+            and surface.surface_type == RoadSurfaceType.ASPHALT_WET
+        )
+        weather = WeatherCondition.RAIN if is_wet else WeatherCondition.FOG
+    else:
+        weather = WeatherCondition.CLEAR
+
+    return weather, light
 
 
 def _determine_candidate_mode(
@@ -95,10 +134,22 @@ def route(
     cfg = config or DEFAULT_CONFIG
 
     # 1. scene metrics & visibility
-    metrics = compute_scene_metrics(frame, config=cfg)
+    # Restrict analysis to the top portion of the frame to exclude the
+    # car interior / dashboard, which inflates contrast in foggy / night scenes.
+    h, w = frame.shape[:2] if hasattr(frame, "shape") else (0, 0)
+    if h > 0 and w > 0 and 0.0 < cfg.scene_roi_top_fraction < 1.0:
+        roi_y2 = int(h * cfg.scene_roi_top_fraction)
+        scene_roi = (0, 0, w, roi_y2)
+    else:
+        scene_roi = None
+    metrics = compute_scene_metrics(frame, roi=scene_roi, config=cfg)
     visibility = estimate_visibility(metrics, config=cfg)
 
-    # 2. lane state (EMA smoothing from previous frame)
+    # 2. lane detection + state (EMA smoothing from previous frame)
+    # If the caller does not supply a lane_detection result, run the built-in
+    # Hough-transform detector on the full (unclipped) frame.
+    if lane_detection is None and _detect_lanes_hough is not None:
+        lane_detection = _detect_lanes_hough(frame, config=cfg)
     prev_lane = prev_state.lane_state if prev_state else None
     lane_state = compute_lane_state(
         lane_detection,
@@ -124,6 +175,9 @@ def route(
         cfg,
     )
 
+    # 7. derive human-readable conditions
+    weather_condition, light_condition = _derive_conditions(visibility, surface)
+
     return ContextState(
         mode=mode,
         scene_metrics=metrics,
@@ -133,6 +187,8 @@ def route(
         braking_multiplier=brake_mult,
         timestamp_s=timestamp_s,
         fps=fps,
+        weather_condition=weather_condition,
+        light_condition=light_condition,
         mode_hold_count=hold_count,
         pending_mode=pending_mode,
         pending_count=pending_count,
