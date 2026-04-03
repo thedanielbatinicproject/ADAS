@@ -1,0 +1,181 @@
+"""
+Context router – main entry point for per-frame scene evaluation.
+
+Combines scene metrics, lane-state, and road-surface heuristics into a
+single :class:`ContextState` that tells the rest of the pipeline which
+operating :class:`Mode` to use.
+
+Hysteresis logic prevents rapid mode-switching by requiring
+:pyattr:`ContextConfig.hysteresis_k` consecutive frames with the same
+candidate mode before actually switching.
+"""
+
+from __future__ import annotations
+
+from typing import Optional, Any
+
+from .types import (
+    Mode,
+    ContextState,
+    LaneDetectionInput,
+    EmergencySignal,
+    VisibilityEstimate,
+    LaneState,
+)
+from .scene_metrics import compute_scene_metrics, estimate_visibility
+from .lane_state import compute_lane_state
+from .road_surface import estimate_road_surface, braking_multiplier
+from .defaults import ContextConfig, DEFAULT_CONFIG
+
+
+# ------------------------------------------------------------------ internal
+
+
+def _determine_candidate_mode(
+    visibility: VisibilityEstimate,
+    lane_state: LaneState,
+    config: ContextConfig,
+) -> Mode:
+    """Apply mode-selection rules (without hysteresis).
+
+    Decision matrix
+    ---------------
+    has_some_lanes AND good_vis  → NORMAL_MARKED
+    has_some_lanes AND bad_vis   → DEGRADED_MARKED
+    no_lanes       AND good_vis  → UNMARKED_GOOD_VIS
+    no_lanes       AND bad_vis   → UNMARKED_DEGRADED
+    """
+    has_good_vis = visibility.confidence >= config.t_vis
+    has_some_lanes = lane_state.confidence >= config.t_lane_low
+
+    if has_some_lanes and has_good_vis:
+        return Mode.NORMAL_MARKED
+    if has_some_lanes and not has_good_vis:
+        return Mode.DEGRADED_MARKED
+    if not has_some_lanes and has_good_vis:
+        return Mode.UNMARKED_GOOD_VIS
+    return Mode.UNMARKED_DEGRADED
+
+
+# -------------------------------------------------------------------- public
+
+
+def route(
+    frame: Any,
+    *,
+    lane_detection: Optional[LaneDetectionInput] = None,
+    timestamp_s: float = 0.0,
+    fps: Optional[float] = None,
+    emergency: Optional[EmergencySignal] = None,
+    prev_state: Optional[ContextState] = None,
+    config: Optional[ContextConfig] = None,
+) -> ContextState:
+    """Analyse a single frame and determine the system operating mode.
+
+    This is the main public entry point of the context package.  Downstream
+    modules (lane detection, obstacle detection, collision-risk) use the
+    returned :class:`ContextState` to adapt their thresholds and logic.
+
+    Parameters
+    ----------
+    frame : numpy.ndarray
+        BGR uint8 image ``(H, W, 3)``.
+    lane_detection : LaneDetectionInput, optional
+        Raw lane-detection result for this frame.
+    timestamp_s : float
+        Frame timestamp in seconds (monotonic or Unix).
+    fps : float, optional
+        Current processing frame rate.
+    emergency : EmergencySignal, optional
+        External (or internal) emergency-override signal.
+    prev_state : ContextState, optional
+        Previous frame's context state (carries hysteresis bookkeeping).
+    config : ContextConfig, optional
+    """
+    cfg = config or DEFAULT_CONFIG
+
+    # 1. scene metrics & visibility
+    metrics = compute_scene_metrics(frame, config=cfg)
+    visibility = estimate_visibility(metrics, config=cfg)
+
+    # 2. lane state (EMA smoothing from previous frame)
+    prev_lane = prev_state.lane_state if prev_state else None
+    lane_state = compute_lane_state(
+        lane_detection,
+        prev_lane_state=prev_lane,
+        config=cfg,
+    )
+
+    # 3. road surface & braking multiplier
+    surface = estimate_road_surface(frame, config=cfg)
+    brake_mult = braking_multiplier(surface, config=cfg)
+
+    # 4. candidate mode (rule-based)
+    candidate = _determine_candidate_mode(visibility, lane_state, cfg)
+
+    # 5. emergency override (bypasses hysteresis)
+    if emergency is not None and emergency.active:
+        candidate = Mode.EMERGENCY_OVERRIDE
+
+    # 6. hysteresis
+    mode, hold_count, pending_mode, pending_count = _apply_hysteresis(
+        candidate,
+        prev_state,
+        cfg,
+    )
+
+    return ContextState(
+        mode=mode,
+        scene_metrics=metrics,
+        visibility=visibility,
+        lane_state=lane_state,
+        road_surface=surface,
+        braking_multiplier=brake_mult,
+        timestamp_s=timestamp_s,
+        fps=fps,
+        mode_hold_count=hold_count,
+        pending_mode=pending_mode,
+        pending_count=pending_count,
+    )
+
+
+# --------------------------------------------------------- hysteresis helper
+
+
+def _apply_hysteresis(
+    candidate: Mode,
+    prev_state: Optional[ContextState],
+    config: ContextConfig,
+) -> tuple[Mode, int, Optional[Mode], int]:
+    """Return ``(mode, hold_count, pending_mode, pending_count)``.
+
+    Emergency override always takes effect immediately.
+    """
+    if prev_state is None:
+        return candidate, 1, None, 0
+
+    if candidate == Mode.EMERGENCY_OVERRIDE:
+        return Mode.EMERGENCY_OVERRIDE, 1, None, 0
+
+    if candidate == prev_state.mode:
+        return candidate, prev_state.mode_hold_count + 1, None, 0
+
+    # candidate differs from current mode
+    if prev_state.pending_mode == candidate:
+        new_pending = prev_state.pending_count + 1
+        if new_pending >= config.hysteresis_k:
+            return candidate, 1, None, 0
+        return (
+            prev_state.mode,
+            prev_state.mode_hold_count + 1,
+            candidate,
+            new_pending,
+        )
+
+    # brand-new candidate – start tracking
+    return (
+        prev_state.mode,
+        prev_state.mode_hold_count + 1,
+        candidate,
+        1,
+    )

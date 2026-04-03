@@ -1,6 +1,7 @@
 from huggingface_hub import snapshot_download
 import argparse
 
+
 def download_dataset(repo_id: str, local_dir: str) -> None:
     print(f"Downloading dataset '{repo_id}' to '{local_dir}'...")
     snapshot_download(
@@ -11,8 +12,11 @@ def download_dataset(repo_id: str, local_dir: str) -> None:
     )
     print("Download complete.")
 
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Download dataset from Hugging Face Hub")
+    parser = argparse.ArgumentParser(
+        description="Download dataset from Hugging Face Hub"
+    )
     parser.add_argument("--repo-id", type=str, default="DBatinic/DADA2000")
     parser.add_argument("--local-dir", type=str, default="data/raw")
     args = parser.parse_args()
