@@ -101,6 +101,17 @@ class ContextConfig:
     # override the degraded flag safely.
     t_vis_dcp_min: float = 0.38
 
+    # ---- DCP atmospheric-scattering confidence penalty ----
+    # Recalibrated blur/edge ranges boost confidence for typical dashcam
+    # footage, but also risk pushing genuinely hazy frames above the
+    # degraded threshold.  A linear penalty on the DCP excess above
+    # t_dcp_penalty partially counteracts this for atmospheric haze.
+    # Clear roads have road-DCP typically ≤ 0.20; hazy/foggy conditions
+    # range from 0.22 upward.  The penalty is zero for DCP ≤ t_dcp_penalty
+    # and grows linearly above it, keeping foggy scenes below t_vis.
+    t_dcp_penalty: float = 0.22      # DCP above this starts reducing confidence
+    w_dcp_penalty: float = 3.0       # penalty per unit of DCP excess
+
     # ---- lane thresholds ----
     t_lane: float = 0.6
     # Lowered from 0.3 → 0.10: urban scenes often produce intermittent

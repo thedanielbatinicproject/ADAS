@@ -34,9 +34,11 @@ Kada se VS Code otvori, kliknite **"Reopen in Container"** ili:
 - Poetry + sve dependencije iz `pyproject.toml`
 - LaTeX (`texlive-full`)
 
+#### Dodatna dokumentacija
 Detaljnije o projektnim specifikacijama pročitajte [ovdje](/docs/other/ProjectSpecifications.md).
-
 Opis lokalne indeksirane baze (records + annotations), svih stupaca i primjera poziva dostupan je u [docs/other/IndexDatabase.md](docs/other/IndexDatabase.md).
+Popis skripti za pokretanje testova i ostalih modula nalazi se u [docs/other/runSomeScripts.md](docs/other/runSomeScripts.md). Za svaku skriptu se podrazumijeva da ste pozicionirani u root direktoriju projekta, što je u docker kontenjeru "root@cont-id:/app".
+
 
 ## Opcionalno: GUI Playback u Dockeru (Windows Host)
 
