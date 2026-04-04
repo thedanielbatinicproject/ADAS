@@ -51,6 +51,8 @@ __all__ = [
     "LaneAvailability",
     "RoadSurfaceType",
     "Mode",
+    "WeatherCondition",
+    "LightCondition",
     "SceneMetrics",
     "VisibilityEstimate",
     "LaneDetectionInput",

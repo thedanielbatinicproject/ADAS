@@ -177,11 +177,13 @@ def route(
     #       → is_degraded must remain True.
     #
     # We correct is_degraded only when ALL signals agree on solar glare:
-    #   • glare_score > t_glare       (sun visible in sensor)
-    #   • glare_score < t_max_glare_dcp  (cap: extreme exposure ≥ 0.40 is
+    #   • glare_score > t_glare         (sun visible in sensor)
+    #   • glare_score > t_glare_strong  (≥ 0.25: must be clearly solar, not
+    #       marginal wet-road or streetlight reflection in [t_glare, 0.25))
+    #   • glare_score < t_max_glare_dcp (cap: extreme exposure ≥ 0.40 is
     #       more likely rain-with-sunshine than simple solar glare)
-    #   • dark_channel_road < t_dcp_haze  (road itself is dark/clear)
-    #   • road surface NOT wet        (wet reflection would also give low DCP)
+    #   • dark_channel_road < t_dcp_haze (road itself is dark/clear)
+    #   • road surface NOT wet          (wet reflection gives same low DCP)
     is_wet = (
         surface is not None
         and surface.surface_type == RoadSurfaceType.ASPHALT_WET
@@ -189,6 +191,7 @@ def route(
     if (
         visibility.is_glare
         and visibility.is_degraded
+        and metrics.glare_score > cfg.t_glare_strong
         and metrics.dark_channel_road < cfg.t_dcp_haze
         and metrics.glare_score < cfg.t_max_glare_dcp
         and not is_wet

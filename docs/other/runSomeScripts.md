@@ -18,3 +18,16 @@ python scripts/dataset/play_index_video.py \
 	--delay-ms 33
 ```
 Napomena: 33ms ~ 30 FPS simulacija.
+
+3) Dohvati nekoliko nasumičnih objekata iz dataseta za svaku kategoriju
+```bash
+python scripts/dataset/sample_conditions.py 
+	--n N 
+	--seed SEED
+	--index-path INDEX_PATH
+	--dataset-root DATASET_ROOT
+```
+sa zadanim vrijednostima:
+n default: 10
+INDEX_PATH default: /app/data/processed/index.db
+DATASET_ROOT default: /app/data/raw/DADA2000

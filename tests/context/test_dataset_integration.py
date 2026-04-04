@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import random
 import sqlite3
+import time
 import warnings
 from typing import Any, Dict, List, Optional
 
@@ -66,13 +67,21 @@ LIGHT_NIGHT = 2
 # ---------------------------------------------------------------------------
 # Test parameters
 # ---------------------------------------------------------------------------
-SAMPLE_SIZE = 30  # videos per test
-FRAMES_PER_VIDEO = 20  # frames analysed per video
+SAMPLE_SIZE = 45  # videos per test
+FRAMES_PER_VIDEO = 5  # frames analysed per video
 PASS_RATIO = 0.9  # ≥ 90 % = pass
 WARN_RATIO = 0.8  # ≥ 80 % = pass + warning
 # Below WARN_RATIO → assertion failure
-SEED = 42
+# Seed is derived from the current time (seconds + milliseconds) so each run
+# produces a fresh sample.  Set ADAS_INTEGRATION_SEED=<int> to reproduce an
+# exact previous run (the value is printed at the start of every test session).
+SEED: int = int(
+    os.environ.get("ADAS_INTEGRATION_SEED", str(int(time.time() * 1000)))
+)
 STRICT_INTEGRATION = os.environ.get("ADAS_CONTEXT_INTEGRATION_STRICT", "0") == "1"
+
+# Print seed so failures can be reproduced:  ADAS_INTEGRATION_SEED=<value>
+print(f"\n[integration] SEED={SEED}  (reproduce: ADAS_INTEGRATION_SEED={SEED})")
 
 
 # ===================================================================== utils

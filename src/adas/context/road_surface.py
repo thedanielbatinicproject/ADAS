@@ -87,9 +87,6 @@ def estimate_road_surface(
     laplacian = cv2.Laplacian(gray, cv2.CV_64F)
     roughness = float(np.var(laplacian))
 
-    # ---- colour uniformity (std of grayscale in ROI) ----
-    uniformity_std = float(np.std(gray))
-
     # ---- specular highlights (fraction of near-white pixels) ----
     specular = float(np.count_nonzero(gray >= cfg.glare_pixel_threshold)) / max(
         gray.size, 1

@@ -26,6 +26,7 @@ import argparse
 import os
 import random
 import sqlite3
+import time
 from typing import Dict, List, Optional, Tuple
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
@@ -201,8 +202,8 @@ def main() -> None:
         help="Number of samples per condition (default: 10).",
     )
     parser.add_argument(
-        "--seed", type=int, default=42,
-        help="Random seed (default: 42).",
+        "--seed", type=int, default=int(time.time() * 1000),
+        help="Random seed (default: current time in milliseconds).",
     )
     parser.add_argument(
         "--index-path", default=DEFAULT_INDEX,

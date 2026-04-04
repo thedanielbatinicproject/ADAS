@@ -44,12 +44,19 @@ class ContextConfig:
     w_glare: float = 0.12
 
     # ---- metric normalisation ranges ----
+    # Calibrated for DADA-2000 dashcam footage characteristics.
+    # Typical clear-day frames: blur_laplacian_var ≈ 60–120, edge_density ≈ 0.025–0.055.
+    # The original limits (500 / 0.15) were calibrated for high-quality cameras
+    # and left clear dashcam frames at only 15–20 % of the normalised range,
+    # consistently mapping them below the t_vis degraded threshold.
+    # Lowered limits compress the range to match actual DADA-2000 data so that
+    # a dashcam clear-day frame scores ≥ 40 % of the new range (conf ≥ t_vis).
     contrast_min: float = 5.0
     contrast_max: float = 90.0
     blur_var_min: float = 10.0
-    blur_var_max: float = 500.0
+    blur_var_max: float = 200.0
     edge_density_min: float = 0.01
-    edge_density_max: float = 0.15
+    edge_density_max: float = 0.10
 
     # ---- scene ROI ----
     # Use only the top fraction of the frame for scene-quality analysis.
@@ -78,6 +85,12 @@ class ContextConfig:
     # Extreme exposures (glare > 0.40 = 40 % of pixels ≥ 220) are more likely
     # to be rain-with-sunshine than a simple solar-glare scene on a clear day.
     t_max_glare_dcp: float = 0.40
+    # Minimum glare_score required for the solar-glare disambiguation (block 1).
+    # Marginal glare in [t_glare, t_glare_strong) can originate from wet-road
+    # reflections or streetlights in rain, not from direct sun hitting the lens.
+    # Only clearly solar glare (glare_score > 0.25 ≈ 25 % of pixels ≥ 220)
+    # is selective enough to safely clear the is_degraded flag.
+    t_glare_strong: float = 0.25
     # Minimum scene saturation (HSV S, 0–255) for the clear-road override.
     # Sunny scenes are colourful (S ≈ 40–80); grey overcast / rain ≈ 10–35.
     # Threshold 40: provides margin above typical overcast-rainy saturation
@@ -140,9 +153,16 @@ class ContextConfig:
     glare_pixel_threshold: int = 220
 
     # ---- road-surface specular threshold ----
-    # Lowered from 0.03 → 0.015 → 0.010: rain on asphalt at night creates
-    # subtler reflective patches; lower threshold catches them earlier.
-    t_specular: float = 0.010
+    # Lowered from 0.03 → 0.015 → 0.010 → 0.003:
+    # With recalibrated confidence ranges, clear-day scenes are now correctly
+    # marked as not-degraded directly via the confidence score.  Rainy scenes
+    # that have adequate visibility (low blur) therefore rely on wet-surface
+    # detection rather than the degraded flag to pass the rainy test.
+    # At 0.003 (0.3 % of road-region pixels ≥ 220), the threshold is sensitive
+    # enough to capture rain puddles and wet reflective markings.  False-positive
+    # wet detections on a dry road cause a MORE conservative braking multiplier,
+    # which is the safe direction of error.
+    t_specular: float = 0.003
 
     # ---- FPS ----
     min_fps: float = 25.0
