@@ -1,6 +1,7 @@
 """Tests for adas.context.scene_metrics - metrics computation & visibility."""
 
 import numpy as np
+from adas.context.defaults import ContextConfig
 from adas.context.scene_metrics import compute_scene_metrics, estimate_visibility
 from adas.context.types import SceneMetrics, VisibilityEstimate
 
@@ -73,8 +74,12 @@ class TestEstimateVisibility:
         assert v.is_glare is True
 
     def test_gradient_has_some_visibility(self, gradient_frame):
+        # Synthetic gradient has unrealistically high DCP (≈0.5) because the
+        # right half is pure white with no dark pixels.  Disable the DCP
+        # atmospheric penalty here so the test stays focused on the base
+        # visibility formula rather than haze detection.
         m = compute_scene_metrics(gradient_frame)
-        v = estimate_visibility(m)
+        v = estimate_visibility(m, config=ContextConfig(w_dcp_penalty=0.0))
         assert v.confidence > 0.0
 
     def test_confidence_in_range(self, noisy_frame):
