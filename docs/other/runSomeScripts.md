@@ -21,10 +21,10 @@ Napomena: 33ms ~ 30 FPS simulacija.
 
 3) Dohvati nekoliko nasumičnih objekata iz dataseta za svaku kategoriju
 ```bash
-python scripts/dataset/sample_conditions.py 
-	--n N 
-	--seed SEED
-	--index-path INDEX_PATH
+python scripts/dataset/sample_conditions.py \
+	--n N \
+	--seed SEED \
+	--index-path INDEX_PATH \
 	--dataset-root DATASET_ROOT
 ```
 sa zadanim vrijednostima:

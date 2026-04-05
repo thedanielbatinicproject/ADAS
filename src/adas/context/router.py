@@ -227,6 +227,35 @@ def route(
         from dataclasses import replace as _dc_replace
         visibility = _dc_replace(visibility, is_degraded=False)
 
+    # 3d. Fog safety override: cross-validate DCP with raw confidence.
+    #
+    # After the recalibrated normalisation ranges (blur_var_max=200,
+    # edge_density_max=0.10) lift typical dashcam confidence toward t_vis,
+    # frames with moderate atmospheric haze (fog, thin smog) can end up
+    # barely above t_vis even though visibility IS genuinely impaired.
+    #
+    # Observed signal pattern:
+    #   • Genuine fog: DCP ≥ 0.22  AND  confidence in [t_vis, ~0.54]
+    #       Fog suppresses edges and contrast, keeping conf low even after
+    #       calibration.  DCP is elevated by airlight scatter.
+    #   • Clear-smoggy (China haze, sunny + pollution): DCP ≥ 0.22 BUT
+    #       confidence > 0.54 — edge and blur detail remain intact.
+    #
+    # When confidence is in the narrow band [t_vis, t_vis_fog_upper] AND
+    # road DCP indicates atmospheric scattering, re-classify as degraded.
+    # Glare frames (handled in 3b) and wet surfaces are excluded to avoid
+    # double-counting.
+    if (
+        not visibility.is_degraded
+        and not visibility.is_glare
+        and metrics.dark_channel_road >= cfg.t_dcp_penalty
+        and metrics.saturation_mean < cfg.t_sat_clear   # muted colour = fog/haze, not sunny
+        and visibility.confidence < cfg.t_vis_fog_upper
+        and not is_wet
+    ):
+        from dataclasses import replace as _dc_replace
+        visibility = _dc_replace(visibility, is_degraded=True)
+
     # 4. candidate mode (rule-based)
     candidate = _determine_candidate_mode(visibility, lane_state, cfg)
 

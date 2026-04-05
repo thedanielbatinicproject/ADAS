@@ -165,17 +165,6 @@ def estimate_visibility(
     )
     confidence = _clamp(confidence)
 
-    # DCP atmospheric-scattering penalty.
-    # Recalibrated normalisation ranges (blur_var_max=200, edge_density_max=0.10)
-    # lift dashcam-footage confidence toward t_vis, but also risk mis-classifying
-    # genuinely hazy/foggy frames as clear when the scene has moderate edge detail
-    # (e.g. urban fog with visible traffic signs).  Road DCP above t_dcp_penalty
-    # (≥ 0.22) reliably indicates atmospheric scattering; a linear reduction brings
-    # such frames back below t_vis while leaving clear-air frames (DCP ≤ 0.20)
-    # completely unaffected.
-    dcp_excess = max(0.0, metrics.dark_channel_road - cfg.t_dcp_penalty)
-    confidence = max(0.0, confidence - cfg.w_dcp_penalty * dcp_excess)
-
     # Night detection:
     #   Day override (primary)   – p95 very bright  → sky/sun visible → day
     #   Day override (secondary) – mean high enough  → scene too bright for night

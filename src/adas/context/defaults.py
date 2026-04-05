@@ -101,16 +101,15 @@ class ContextConfig:
     # override the degraded flag safely.
     t_vis_dcp_min: float = 0.38
 
-    # ---- DCP atmospheric-scattering confidence penalty ----
-    # Recalibrated blur/edge ranges boost confidence for typical dashcam
-    # footage, but also risk pushing genuinely hazy frames above the
-    # degraded threshold.  A linear penalty on the DCP excess above
-    # t_dcp_penalty partially counteracts this for atmospheric haze.
-    # Clear roads have road-DCP typically ≤ 0.20; hazy/foggy conditions
-    # range from 0.22 upward.  The penalty is zero for DCP ≤ t_dcp_penalty
-    # and grows linearly above it, keeping foggy scenes below t_vis.
-    t_dcp_penalty: float = 0.22      # DCP above this starts reducing confidence
-    w_dcp_penalty: float = 3.0       # penalty per unit of DCP excess
+    # ---- DCP-based fog cross-validation (router override) ----
+    # When confidence is barely above t_vis *and* DCP indicates atmospheric
+    # scatter, the scene is more likely genuine fog than a clear smoggy day.
+    # Smoggy-but-sunny scenes have high DCP yet higher confidence (edge/blur
+    # detail is still intact); genuine fog suppresses both, keeping confidence
+    # in the narrow band [t_vis, t_vis_fog_upper].
+    # The router block 3d overrides is_degraded=True for frames in this band.
+    t_dcp_penalty: float = 0.22      # DCP above this qualifies as atmospheric haze
+    t_vis_fog_upper: float = 0.73    # conf ceiling: above this, treat as clear-smoggy
 
     # ---- lane thresholds ----
     t_lane: float = 0.6
