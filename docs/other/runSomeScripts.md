@@ -1,6 +1,16 @@
-Popis templateova za skripte koje se mogu pokrenuti:
+Popis predložaka za skripte koje se mogu pokrenuti:
 
-1) Build index (records + annotations)
+0) Pokretanje glavnog dashboarda (host aplikacija)
+
+Dashboard je centralni UI za odabir videa, filtriranje baze i pokretanje svih glavnih skripti bez ručnog tipkanja naredbi u konzolu.
+
+```bash
+python main.py
+```
+
+U startup overlayu korisnici kliknu `RUN DOCKER`, a zatim sve dalje pokreću iz kartica.
+
+1) Izgradnja indexa (records + annotations)
 
 ```bash
 python scripts/dataset/build_index.py \
@@ -8,7 +18,7 @@ python scripts/dataset/build_index.py \
 	--index-path data/processed/index.db
 ```
 
-2) Pusti točno određeni video po category/video ID
+2) Pokretanje točno određenog videa po category/video ID
 
 ```bash
 python scripts/dataset/play_index_video.py \
@@ -19,7 +29,7 @@ python scripts/dataset/play_index_video.py \
 ```
 Napomena: 33ms ~ 30 FPS simulacija.
 
-3) Dohvati nekoliko nasumičnih objekata iz dataseta za svaku kategoriju
+3) Dohvaćanje nekoliko nasumičnih objekata iz dataseta za svaku kategoriju
 ```bash
 python scripts/dataset/sample_conditions.py \
 	--n N \
@@ -32,13 +42,13 @@ n default: 10
 INDEX_PATH default: /app/data/processed/index.db
 DATASET_ROOT default: /app/data/raw/DADA2000
 
-4) Pokreni ADAS scenario pipeline na jednom videu
+4) Pokretanje ADAS scenario pipelinea na jednom videu
 
 Pokreće cijeli pipeline: učitavanje frameova -> detekcija traka -> detekcija prepreka -> procjena rizika sudara -> kontekst -> UI dashboard -> audio upozorenja.
 
 Preduvjeti: izgrađen index (`build_index.py`), X server za GUI (VcXsrv), opcionalno PulseAudio za zvuk.
 
-Za audio: na Windows hostu pokrenite `scripts\start_pulseaudio.bat` (PulseAudio je uključen u `dep\pulseaudio-1.1`, nije potrebna zasebna instalacija).
+Za audio: na Windows hostu korisnici pokreću `scripts\start_pulseaudio.bat` (PulseAudio je uključen u `dep\pulseaudio-1.1`, nije potrebna zasebna instalacija).
 
 ```bash
 python scripts/run_scenario.py \
@@ -102,9 +112,9 @@ python scripts/debug_obstacles.py \
 ```
 Dodatni parametri: `--max-frames N`, `--delay-ms MS`, `--max-width PX`, `--ui-backend {dpg,cv2}`.
 
-7) Konteksna analiza videa
+7) Kontekstna analiza videa
 
-Pokreće konteksnu analizu (vidljivost, vremenski uvjeti, stanje traka, površina ceste) na svakom N-tom frameu. U terminal modu ispisuje tablicu, u GUI modu prikazuje player s overlay panelom.
+Pokreće kontekstnu analizu (vidljivost, vremenski uvjeti, stanje traka, površina ceste) na svakom N-tom frameu. U terminal modu ispisuje tablicu, u GUI modu prikazuje player s overlay panelom.
 
 Preduvjeti: izgrađen index, za GUI mod: X server.
 
