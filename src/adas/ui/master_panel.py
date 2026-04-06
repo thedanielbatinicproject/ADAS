@@ -46,6 +46,7 @@ class MasterDashboard:
         self.enum_columns: List[str] = []
         self.free_text_columns: List[str] = []
         self.enum_values: Dict[str, List[str]] = {}
+        self.enum_map_readable: Dict[Tuple[str, str], str] = {}  # (col, val) -> label
         self.enum_filters: Dict[str, str] = {}
         self.find_filters: Dict[str, Optional[int]] = {"category_id": None, "video_id": None}
 
@@ -61,6 +62,11 @@ class MasterDashboard:
         self._process_on_exit: Optional[Callable[[int], None]] = None
         self._active_kill_pattern: Optional[str] = None
         self.startup_log_lines: List[Tuple[str, Tuple[int, int, int]]] = []
+        self._hidden_columns: set = {
+            "maps_path", "type", "abnormal_start_frame", "total_frames",
+            "interval_0_tai", "interval_tai_tco", "interval_tai_tae",
+            "interval_tco_tae", "interval_tae_end",
+        }
 
     def run(self) -> None:
         dpg.create_context()
@@ -69,6 +75,9 @@ class MasterDashboard:
         dpg.create_viewport(title="ADAS Control Panel", width=1680, height=980, x_pos=120, y_pos=60, decorated=True)
         dpg.setup_dearpygui()
         dpg.show_viewport()
+        dpg.set_primary_window("root", True)
+        dpg.set_viewport_resize_callback(self._on_viewport_resize)
+        self._on_viewport_resize()
         self._reload_table_data(show_message=True)
 
         while dpg.is_dearpygui_running():
@@ -109,7 +118,7 @@ class MasterDashboard:
         self._build_startup_overlay()
 
     def _build_table_card(self) -> None:
-        with dpg.child_window(width=1180, height=-1, border=True, tag="table_card"):
+        with dpg.child_window(width=-1, height=-1, border=True, tag="table_card"):
             dpg.add_text("Video Index Table", color=(255, 100, 100))
             dpg.add_separator()
             with dpg.group(horizontal=True):
@@ -143,12 +152,11 @@ class MasterDashboard:
 
             dpg.add_spacer(height=5)
             with dpg.collapsing_header(label="Column Filters", default_open=False):
-                dpg.add_text("Enum-like columns are filterable here. Free text columns are display-only.", color=(170, 170, 170))
-                with dpg.child_window(height=100, border=False):
-                    dpg.add_group(tag="enum_filter_group")
+                dpg.add_text("Enum-like columns are filterable here.", color=(170, 170, 170))
+                dpg.add_group(tag="enum_filter_group")
 
             dpg.add_spacer(height=5)
-            with dpg.child_window(height=400, border=False):
+            with dpg.child_window(height=-1, border=False, tag="table_wrapper"):
                 dpg.add_table(
                     tag="video_table",
                     header_row=True,
@@ -159,13 +167,13 @@ class MasterDashboard:
                     borders_outerV=True,
                     scrollX=True,
                     scrollY=True,
-                    policy=dpg.mvTable_SizingStretchProp,
+                    policy=dpg.mvTable_SizingFixedFit,
                 )
         if self._table_card_theme is not None:
             dpg.bind_item_theme("table_card", self._table_card_theme)
 
     def _build_actions_panel(self) -> None:
-        with dpg.child_window(width=-1, height=-1, border=True):
+        with dpg.child_window(width=480, height=-1, border=True, tag="actions_panel"):
             dpg.add_text("Selected Video (OV)", color=(200, 220, 255))
             dpg.add_text("None", tag="selected_video_label", color=(255, 255, 255))
             dpg.add_separator()
@@ -398,19 +406,36 @@ class MasterDashboard:
             if os.path.exists(pa_bat):
                 self._startup_log(f"PulseAudio script found: {pa_bat}", (100, 220, 100))
                 if not check_only:
-                    self._startup_log("starting PulseAudio...", (170, 220, 170))
+                    self._startup_log("attempting to start: cmd /c start_pulseaudio.bat", (170, 220, 170))
                     try:
-                        subprocess.Popen(["cmd", "/c", pa_bat], cwd=self.project_root)
-                        time.sleep(1.0)
+                        proc = subprocess.Popen(["cmd", "/c", pa_bat], cwd=self.project_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        time.sleep(2.0)
+                        retcode = proc.poll()
+                        if retcode is None:
+                            self._startup_log("PulseAudio process started (still running)", (170, 220, 170))
+                        elif retcode == 0:
+                            self._startup_log("PulseAudio process exited with code 0 (success)", (100, 220, 100))
+                        else:
+                            _, err = proc.communicate()
+                            self._startup_log(f"PulseAudio process exited with code {retcode}: {err[:100]}", (255, 150, 120))
                     except Exception as exc:
                         runtime_ok = False
-                        self._startup_log(f"PulseAudio start failed: {exc}", (255, 120, 120))
+                        self._startup_log(f"PulseAudio start failed: {type(exc).__name__}: {exc}", (255, 120, 120))
 
-                if self._is_port_open("127.0.0.1", 4713):
-                    self._startup_log("PulseAudio TCP port 4713 reachable", (100, 220, 100))
+                    self._startup_log("waiting for PulseAudio TCP port 4713...", (200, 200, 100))
+                    for attempt in range(5):
+                        if self._is_port_open("127.0.0.1", 4713):
+                            self._startup_log(f"PulseAudio TCP port 4713 reachable (attempt {attempt+1}/5)", (100, 220, 100))
+                            break
+                        else:
+                            self._startup_log(f"Port check {attempt+1}/5: 127.0.0.1:4713 not reachable", (200, 180, 100))
+                            if attempt < 4:
+                                time.sleep(0.5)
+                    else:
+                        runtime_ok = False
+                        self._startup_log("PulseAudio TCP port 4713 still not reachable after 5 attempts (warning - GUI may not work)", (255, 180, 120))
                 else:
-                    runtime_ok = False
-                    self._startup_log("PulseAudio TCP port 4713 not reachable (warning - GUI may not work)", (255, 180, 120))
+                    self._startup_log("PulseAudio startup skipped (check_only mode)", (220, 220, 140))
             else:
                 runtime_ok = False
                 self._startup_log("PulseAudio script missing (warning - GUI may not work)", (255, 180, 120))
@@ -449,21 +474,26 @@ class MasterDashboard:
                     self._startup_log(f"  {line}", (170, 220, 170))
             else:
                 self._startup_log("container not running, starting...", (200, 200, 100))
+                self._startup_log(f"running: docker compose up -d {self.service_name}", (170, 200, 170))
                 rc, out = self._run_short_command(["docker", "compose", "up", "-d", self.service_name])
                 if rc == 0:
-                    self._startup_log("docker compose up -d adas -> OK", (100, 220, 100))
+                    self._startup_log("docker compose up -d adas -> exit code 0 (OK)", (100, 220, 100))
+                    self._startup_log("verifying container status...", (170, 200, 170))
                     rc_ps, out_ps = self._run_short_command(["docker", "compose", "ps", "--status", "running", self.service_name])
                     if rc_ps == 0 and self.service_name in out_ps:
                         for line in out_ps.splitlines()[-3:]:
                             self._startup_log(f"  {line}", (170, 220, 170))
                     else:
                         docker_ok = False
-                        self._startup_log("container not reported as running", (255, 120, 120))
+                        self._startup_log("container not reported as running after docker compose up", (255, 120, 120))
+                        for line in out_ps.splitlines()[-3:]:
+                            self._startup_log("  " + line, (255, 160, 160))
                 else:
                     docker_ok = False
-                    self._startup_log("docker compose up -d adas -> failed", (255, 120, 120))
-                    for line in out.splitlines()[-8:]:
-                        self._startup_log(f"  {line}", (255, 160, 160))
+                    self._startup_log(f"docker compose up -d adas -> exit code {rc} (FAILED)", (255, 120, 120))
+                    self._startup_log("docker compose up error output:", (255, 150, 120))
+                    for line in out.splitlines()[-12:]:
+                        self._startup_log("  " + line, (255, 160, 160))
         elif check_only:
             self._startup_log("docker compose start skipped (check_only)", (220, 220, 140))
         else:
@@ -501,6 +531,21 @@ class MasterDashboard:
                 return True
         return False
 
+    def _on_viewport_resize(self, *_args) -> None:
+        """Handle viewport resize - update layout dynamically."""
+        try:
+            vp_w = dpg.get_viewport_client_width() or 1680
+            vp_h = dpg.get_viewport_client_height() or 980
+            panel_w = 480
+            table_w = max(800, vp_w - panel_w - 20)
+            h = max(500, vp_h - 10)
+            if dpg.does_item_exist("table_card"):
+                dpg.configure_item("table_card", width=table_w, height=h)
+            if dpg.does_item_exist("actions_panel"):
+                dpg.configure_item("actions_panel", height=h)
+        except Exception:
+            pass
+
     def _is_port_open(self, host: str, port: int) -> bool:
         try:
             with socket.create_connection((host, port), timeout=1):
@@ -517,6 +562,7 @@ class MasterDashboard:
 
     def _reload_table_data(self, show_message: bool = False) -> None:
         self.rows, self.columns = self._load_index_rows()
+        self._parse_csv_header()
         self._derive_filter_metadata()
         self._build_enum_filter_widgets()
         self._sync_sort_controls()
@@ -556,6 +602,34 @@ class MasterDashboard:
         finally:
             conn.close()
 
+
+    def _parse_csv_header(self) -> None:
+        """Parse enum mappings from CSV header."""
+        self.enum_map_readable.clear()
+        csv_path = os.path.join(self.project_root, "data/raw/DADA2000_video_annotations.csv")
+        if not os.path.exists(csv_path):
+            return
+        try:
+            with open(csv_path, 'r', encoding='utf-8-sig') as f:
+                header = f.readline().strip().split(';')
+            for col_def in header:
+                if '(' not in col_def:
+                    continue
+                col_name = col_def.split('(')[0].strip()
+                options_part = col_def.split('(')[1].split(')')[0]
+                options = [o.strip() for o in options_part.split(',')]
+                for i, label in enumerate(options, start=1):
+                    self.enum_map_readable[(col_name, str(i))] = label
+        except Exception:
+            pass
+
+    def _readable_enum_value(self, col: str, val) -> str:
+        """Return readable label for enum value."""
+        if val is None:
+            return ""
+        key = (col, str(val))
+        return self.enum_map_readable.get(key, str(val))
+
     def _derive_filter_metadata(self) -> None:
         self.enum_columns = []
         self.free_text_columns = []
@@ -565,7 +639,7 @@ class MasterDashboard:
         self.enum_filters = {}
 
         for col in self.columns:
-            if col in {"category_id", "video_id"}:
+            if col in {"category_id", "video_id"} or col in self._hidden_columns:
                 continue
 
             vals = [r.get(col) for r in self.rows if r.get(col) not in (None, "")]
@@ -589,16 +663,36 @@ class MasterDashboard:
             with dpg.group(horizontal=True, parent="enum_filter_group"):
                 dpg.add_text(f"{col}:", color=(180, 180, 180))
                 tag = f"filter_{col}"
+                # Create readable labels for dropdown
+                readable_opts = []
+                for opt in self.enum_values[col]:
+                    if opt == "All":
+                        readable_opts.append(opt)
+                    else:
+                        readable_opts.append(self._readable_enum_value(col, opt))
                 dpg.add_combo(
-                    self.enum_values[col],
+                    readable_opts,
                     default_value=self.enum_filters.get(col, "All"),
                     width=220,
                     tag=tag,
-                    callback=lambda _s, val, c=col: self._on_enum_filter_changed(c, val),
+                    user_data=col,
+                    callback=lambda s, a, u: self._on_enum_filter_changed_readable(u, a),
                 )
 
     def _on_enum_filter_changed(self, col: str, value: str) -> None:
         self.enum_filters[col] = value
+        self._apply_all_filters()
+    
+    def _on_enum_filter_changed_readable(self, col: str, readable_value: str) -> None:
+        if col is None or col not in self.enum_values:
+            return
+        if readable_value == "All":
+            self.enum_filters[col] = "All"
+        else:
+            for opt in self.enum_values[col]:
+                if self._readable_enum_value(col, opt) == readable_value:
+                    self.enum_filters[col] = opt
+                    break
         self._apply_all_filters()
 
     def _apply_find_filter(self, col: str) -> None:
@@ -623,7 +717,7 @@ class MasterDashboard:
         self._apply_all_filters()
 
     def _sync_sort_controls(self) -> None:
-        sortable_cols = ["(none)"] + list(self.columns)
+        sortable_cols = ["(none)"] + [c for c in self.columns if c not in self._hidden_columns]
         dpg.configure_item("sort_column_combo", items=sortable_cols)
         if self.sort_column and self.sort_column in self.columns:
             dpg.set_value("sort_column_combo", self.sort_column)
@@ -714,6 +808,13 @@ class MasterDashboard:
             self._update_page_rows()
             self._render_table()
 
+    def _format_cell(self, col: str, val) -> str:
+        if val is None:
+            return ""
+        if col == "accident_occurred":
+            return "true" if str(val) == "1" else "false"
+        return self._readable_enum_value(col, val)
+
     def _render_table(self) -> None:
         table = "video_table"
         dpg.delete_item(table, children_only=True)
@@ -725,8 +826,10 @@ class MasterDashboard:
                 dpg.add_text("index.db not found. run build_index.py first")
             return
 
-        dpg.add_table_column(label="Select", parent=table, init_width_or_weight=0.07)
-        for col in self.columns:
+        visible_cols = [c for c in self.columns if c not in self._hidden_columns]
+
+        dpg.add_table_column(label="Select", parent=table, init_width_or_weight=80)
+        for col in visible_cols:
             dpg.add_table_column(label=col, parent=table)
 
         for i, row in enumerate(self.page_rows):
@@ -736,28 +839,39 @@ class MasterDashboard:
                 sel_label = "Selected" if self._row_uid(row) == self.selected_row_id else "Select"
                 dpg.add_button(
                     label=sel_label,
-                    callback=lambda _s, _a, r=row: self._on_select_row(r),
+                    user_data=row,
+                    callback=lambda _s, _a, r: self._on_select_row(r),
                     width=-1,
                     height=22,
                 )
-                for col in self.columns:
-                    val = row.get(col)
-                    dpg.add_text("" if val is None else str(val))
+                for col in visible_cols:
+                    display = self._format_cell(col, row.get(col))
+                    if col == "measures":
+                        dpg.add_text(display, wrap=300)
+                    else:
+                        dpg.add_text(display)
 
             if self._row_uid(row) == self.selected_row_id and self._row_highlight_theme is not None:
                 dpg.bind_item_theme(row_tag, self._row_highlight_theme)
 
-    def _row_uid(self, row: Dict[str, Any]) -> str:
+    def _row_uid(self, row: Optional[Dict[str, Any]]) -> str:
+        if row is None:
+            return "none"
         return f"{row.get('record_id','')}-{row.get('category_id','')}-{row.get('video_id','')}"
 
-    def _on_select_row(self, row: Dict[str, Any]) -> None:
-        self.selected_row = row
-        self.selected_row_id = self._row_uid(row)
-        cat = row.get("category_id")
-        vid = row.get("video_id")
-        dpg.set_value("selected_video_label", f"category_id={cat}, video_id={vid}, record_id={row.get('record_id')}")
-        dpg.set_value("run_scenario_category", f"category_id: {cat}")
-        dpg.set_value("run_scenario_video", f"video_id: {vid}")
+    def _on_select_row(self, row: Optional[Dict[str, Any]]) -> None:
+        if row is None:
+            return
+        try:
+            self.selected_row = row
+            self.selected_row_id = self._row_uid(row)
+            cat = row.get("category_id")
+            vid = row.get("video_id")
+            dpg.set_value("selected_video_label", f"category_id={cat}, video_id={vid}, record_id={row.get('record_id')}")
+            dpg.set_value("run_scenario_category", f"category_id: {cat}")
+            dpg.set_value("run_scenario_video", f"video_id: {vid}")
+        except Exception as exc:
+            pass
         self._render_table()
 
     def _ensure_selected(self) -> Optional[Tuple[int, int]]:
