@@ -570,7 +570,147 @@ def _put_top_overlay(
     )
 
 
-# ── GUI main loop ──────────────────────────────────────────────────────────
+# ── GUI main loop (DPG) ────────────────────────────────────────────────
+
+
+def _run_gui_dpg(
+    args: argparse.Namespace,
+    record: Dict[str, Any],
+    annotation: Optional[Dict[str, Any]],
+    frame_refs: List[Tuple[int, Any]],
+) -> int:
+    """DPG-based GUI: GPU-accelerated rendering with native text stats."""
+    from adas.ui.player import create_player, run_player_loop
+
+    cfg = ContextConfig()
+    every_n = args.every_n
+
+    # Background context-analysis worker (same pattern as cv2 version)
+    _ctx_in_q: "_queue.Queue[Optional[tuple]]" = _queue.Queue(maxsize=1)
+    _ctx_out_q: "_queue.Queue[tuple]" = _queue.Queue(maxsize=4)
+    _ctx_stop = threading.Event()
+    _cur_ctx: List[Any] = [None, None]  # [ContextState, frame_idx]
+
+    def _ctx_worker() -> None:
+        local_prev: Optional[ContextState] = None
+        while not _ctx_stop.is_set():
+            try:
+                task = _ctx_in_q.get(timeout=0.05)
+            except _queue.Empty:
+                continue
+            if task is None:
+                break
+            f, fidx, ts = task
+            state = route(
+                f,
+                timestamp_s=ts,
+                fps=cfg.min_fps,
+                prev_state=local_prev,
+                config=cfg,
+            )
+            local_prev = state
+            try:
+                _ctx_out_q.put_nowait((fidx, state))
+            except _queue.Full:
+                pass
+
+    worker = threading.Thread(target=_ctx_worker, daemon=True, name="ctx-worker")
+    worker.start()
+
+    _last_submit = [-1]
+
+    def _overlay(display: np.ndarray, idx: int) -> np.ndarray:
+        # Submit every N-th frame for context analysis
+        if idx % every_n == 0 and idx != _last_submit[0]:
+            _last_submit[0] = idx
+            ts = idx / max(cfg.min_fps, 1.0)
+            try:
+                _ctx_in_q.put_nowait((display.copy(), idx, ts))
+            except _queue.Full:
+                pass
+
+        # Collect completed results
+        try:
+            while True:
+                fidx, ctx = _ctx_out_q.get_nowait()
+                _cur_ctx[0] = ctx
+                _cur_ctx[1] = fidx
+        except _queue.Empty:
+            pass
+
+        # Draw frame label on the image
+        lbl = frame_label(idx, annotation)
+        color = _LABEL_COLORS_BGR.get(lbl, (150, 150, 150))
+        text = f"cat={args.category_id} vid={args.video_id}  [{lbl}]"
+        cv2.putText(display, text, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 4)
+        cv2.putText(display, text, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 2)
+        return display
+
+    def _stats(idx: int) -> Dict[str, Any]:
+        ctx = _cur_ctx[0]
+        ctx_fidx = _cur_ctx[1]
+        if ctx is None:
+            return {"status": f"Waiting for analysis (every {every_n} frames)..."}
+        stats: Dict[str, Any] = {}
+        stats["mode"] = ctx.mode.value
+        stats["weather"] = ctx.weather_condition.value
+        stats["light"] = ctx.light_condition.value
+        if ctx.lane_state:
+            stats["lane_state"] = ctx.lane_state.availability.value
+            stats["lane_conf"] = f"{ctx.lane_state.confidence:.2f}"
+        if ctx.road_surface:
+            stats["road_surface"] = ctx.road_surface.surface_type.value
+        if ctx.visibility:
+            stats["visibility_conf"] = f"{ctx.visibility.confidence:.2f}"
+        stats["braking_mult"] = f"{ctx.braking_multiplier:.2f}"
+        if ctx.scene_metrics:
+            sm = ctx.scene_metrics
+            stats["brightness"] = f"{sm.brightness_mean:.0f}"
+            stats["contrast"] = f"{sm.contrast_std:.1f}"
+            stats["blur"] = f"{sm.blur_laplacian_var:.0f}"
+            stats["edges"] = f"{sm.edge_density:.3f}"
+        if ctx_fidx is not None:
+            stats["ctx_frame"] = str(ctx_fidx)
+        # Ground-truth annotations
+        gt_rows = _annot_summary(annotation)
+        for lbl_name, val, _ in gt_rows:
+            stats[f"gt_{lbl_name.lower()}"] = val
+        return stats
+
+    player = create_player("dpg", window_name=args.window_name, max_display_width=args.max_width)
+    fps = (1000.0 / args.delay_ms) if args.delay_ms > 0 else 0.0
+
+    start = time.time()
+    shown = run_player_loop(
+        frame_refs,
+        parser.get_frame,
+        player=player,
+        overlay_fn=_overlay,
+        stats_fn=_stats,
+        frame_label_fn=lambda idx: frame_label(idx, annotation),
+        target_fps=fps,
+    )
+
+    # Cleanup worker
+    _ctx_stop.set()
+    try:
+        _ctx_in_q.put_nowait(None)
+    except _queue.Full:
+        pass
+    worker.join(timeout=2.0)
+
+    elapsed = max(time.time() - start, 1e-6)
+    print(
+        _c(
+            f"\n[INFO] Playback finished. frames_shown={shown}, "
+            f"avg_fps={shown / elapsed:.2f}",
+            C_GREEN,
+        )
+    )
+    return 0
+
+
+# ── GUI main loop (CV2) ────────────────────────────────────────────────────
 
 
 def _run_gui(
@@ -869,7 +1009,13 @@ def main() -> int:
     p.add_argument(
         "--window-name",
         default="Context Analyzer",
-        help="GUI: OpenCV window name",
+        help="GUI: window name",
+    )
+    p.add_argument(
+        "--ui-backend",
+        choices=["dpg", "cv2"],
+        default="dpg",
+        help="GUI: UI backend (default: dpg). 'cv2' for legacy OpenCV window.",
     )
     args = p.parse_args()
 
@@ -918,6 +1064,8 @@ def main() -> int:
         annotation = get_annotation_by_key(
             args.index_path, args.category_id, args.video_id
         )
+        if args.ui_backend == "dpg":
+            return _run_gui_dpg(args, record, annotation, all_frames)
         return _run_gui(args, record, annotation, all_frames)
 
     # ── Terminal mode ───────────────────────────────────────────────────

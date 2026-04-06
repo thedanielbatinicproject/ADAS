@@ -66,6 +66,10 @@ def _parse_args() -> argparse.Namespace:
         "--max-width", type=int, default=1280,
         help="Max display width in pixels.",
     )
+    p.add_argument(
+        "--ui-backend", choices=["dpg", "cv2"], default="dpg",
+        help="UI backend (default: dpg). 'cv2' for legacy OpenCV window.",
+    )
     return p.parse_args()
 
 
@@ -109,6 +113,14 @@ def main() -> None:
     record_path = record["path"]
     print(f"[debug_obstacles] Playing: {record_path}")
 
+    # Build frame list (iter_frames yields (idx, ref) tuples)
+    frame_items = list(parser.iter_frames(record_path))
+    if not frame_items:
+        print("[ERROR] No frames found.")
+        sys.exit(1)
+    if args.max_frames is not None:
+        frame_items = frame_items[: args.max_frames]
+
     detector = Detector()
     tracker = SimpleTracker()
 
@@ -118,51 +130,51 @@ def main() -> None:
         lane_func = (process_frame, draw_lanes)
 
     win = "Obstacle Detection Debug"
-    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
 
-    paused = False
-    frame_count = 0
-
-    for frame_idx, frame_ref in enumerate(parser.iter_frames(record_path)):
-        if args.max_frames is not None and frame_count >= args.max_frames:
-            break
-
-        frame = parser.get_frame(frame_ref)
-        if frame is None:
-            continue
-
+    def _overlay(display, idx):
         lane_output = None
-        display = frame.copy()
-
         if lane_func is not None:
             _pf, _dl = lane_func
-            lane_output = _pf(frame)
+            lane_output = _pf(display)
             display = _dl(display, lane_output)
-
-        raw = detector.detect(frame, lane_output=lane_output)
+        raw = detector.detect(display, lane_output=lane_output)
         tracked = tracker.update(raw)
-
         display = draw_obstacles(display, tracked)
-
-        # Info text
-        info = f"frame={frame_idx} detected={len(raw)} tracked={len(tracked)}"
+        info = f"frame={idx} detected={len(raw)} tracked={len(tracked)}"
         cv2.putText(
             display, info, (10, 24),
             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1, cv2.LINE_AA,
         )
+        return display
 
-        display = _resize(display, args.max_width)
-        cv2.imshow(win, display)
+    if args.ui_backend == "dpg":
+        from adas.ui.player import create_player, run_player_loop
+        player = create_player("dpg", window_name=win, max_display_width=args.max_width)
+        fps = (1000.0 / args.delay_ms) if args.delay_ms > 0 else 0.0
+        frame_count = run_player_loop(
+            frame_items, parser.get_frame, player=player,
+            overlay_fn=_overlay, target_fps=fps,
+        )
+    else:
+        cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+        paused = False
+        frame_count = 0
+        for idx, frame_ref in frame_items:
+            frame = parser.get_frame(frame_ref)
+            if frame is None:
+                continue
+            display = frame.copy()
+            display = _overlay(display, idx)
+            display = _resize(display, args.max_width)
+            cv2.imshow(win, display)
+            key = cv2.waitKey(1 if paused else args.delay_ms) & 0xFF
+            if key in (ord("q"), ord("Q"), 27):
+                break
+            if key in (ord(" "), ord("p")):
+                paused = not paused
+            frame_count += 1
+        cv2.destroyAllWindows()
 
-        key = cv2.waitKey(1 if paused else args.delay_ms) & 0xFF
-        if key in (ord("q"), ord("Q"), 27):
-            break
-        if key in (ord(" "), ord("p")):
-            paused = not paused
-
-        frame_count += 1
-
-    cv2.destroyAllWindows()
     print(f"[debug_obstacles] Processed {frame_count} frames.")
 
 

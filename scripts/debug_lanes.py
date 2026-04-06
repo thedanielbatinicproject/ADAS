@@ -18,7 +18,6 @@ import argparse
 import os
 import sqlite3
 import sys
-import time
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SRC_ROOT = os.path.join(PROJECT_ROOT, "src")
@@ -35,7 +34,7 @@ if not os.environ.get("QT_QPA_FONTDIR"):
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
-from adas.dataset import parser, indexer  # noqa: E402
+from adas.dataset import parser  # noqa: E402
 from adas.lane_detection import process_frame, draw_lanes, draw_edges  # noqa: E402
 from adas.lane_detection.processing import LaneProcessingConfig  # noqa: E402
 
@@ -67,6 +66,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--max-width", type=int, default=1280,
         help="Max display width in pixels.",
+    )
+    p.add_argument(
+        "--ui-backend", choices=["dpg", "cv2"], default="dpg",
+        help="UI backend (default: dpg). 'cv2' for legacy OpenCV window.",
     )
     return p.parse_args()
 
@@ -111,29 +114,22 @@ def main() -> None:
     record_path = record["path"]
     print(f"[debug_lanes] Playing: {record_path}")
 
+    # Build frame list (iter_frames yields (idx, ref) tuples)
+    frame_items = list(parser.iter_frames(record_path))
+    if not frame_items:
+        print("[ERROR] No frames found.")
+        sys.exit(1)
+    if args.max_frames is not None:
+        frame_items = frame_items[: args.max_frames]
+
     lane_cfg = LaneProcessingConfig()
     win = "Lane Detection Debug"
-    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
 
-    paused = False
-    frame_count = 0
-
-    for frame_idx, frame_ref in enumerate(parser.iter_frames(record_path)):
-        if args.max_frames is not None and frame_count >= args.max_frames:
-            break
-
-        frame = parser.get_frame(frame_ref)
-        if frame is None:
-            continue
-
-        lane_out = process_frame(frame, config=lane_cfg)
-
-        display = frame.copy()
+    def _overlay(display, _idx):
+        lane_out = process_frame(display, config=lane_cfg)
         if args.show_edges:
             display = draw_edges(display, lane_out, alpha=0.45)
         display = draw_lanes(display, lane_out)
-
-        # Annotate confidence
         conf_text = (
             f"lane_conf={lane_out.lane_confidence:.2f} "
             f"L={lane_out.left_confidence:.2f} "
@@ -144,25 +140,41 @@ def main() -> None:
             display, conf_text, (10, 24),
             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1, cv2.LINE_AA,
         )
-
         if lane_out.lane_width_px is not None:
             cv2.putText(
                 display, f"lane_width={lane_out.lane_width_px:.0f}px",
                 (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 200), 1, cv2.LINE_AA,
             )
+        return display
 
-        display = _resize(display, args.max_width)
-        cv2.imshow(win, display)
+    if args.ui_backend == "dpg":
+        from adas.ui.player import create_player, run_player_loop
+        player = create_player("dpg", window_name=win, max_display_width=args.max_width)
+        fps = (1000.0 / args.delay_ms) if args.delay_ms > 0 else 0.0
+        frame_count = run_player_loop(
+            frame_items, parser.get_frame, player=player,
+            overlay_fn=_overlay, target_fps=fps,
+        )
+    else:
+        cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+        paused = False
+        frame_count = 0
+        for idx, frame_ref in frame_items:
+            frame = parser.get_frame(frame_ref)
+            if frame is None:
+                continue
+            display = frame.copy()
+            display = _overlay(display, idx)
+            display = _resize(display, args.max_width)
+            cv2.imshow(win, display)
+            key = cv2.waitKey(1 if paused else args.delay_ms) & 0xFF
+            if key in (ord("q"), ord("Q"), 27):
+                break
+            if key in (ord(" "), ord("p")):
+                paused = not paused
+            frame_count += 1
+        cv2.destroyAllWindows()
 
-        key = cv2.waitKey(1 if paused else args.delay_ms) & 0xFF
-        if key in (ord("q"), ord("Q"), 27):
-            break
-        if key in (ord(" "), ord("p")):
-            paused = not paused
-
-        frame_count += 1
-
-    cv2.destroyAllWindows()
     print(f"[debug_lanes] Processed {frame_count} frames.")
 
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import socket
 import sys
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -24,6 +25,20 @@ if SRC_ROOT not in sys.path:
     sys.path.insert(0, SRC_ROOT)
 
 from adas.scenario import run_scenario, ScenarioConfig  # noqa: E402
+
+
+def _check_pulseaudio() -> bool:
+    """Return True if PulseAudio TCP server is reachable on the host."""
+    host = os.environ.get("PULSE_SERVER", "tcp:host.docker.internal:4713")
+    # Parse host:port from PULSE_SERVER (format: tcp:host:port)
+    parts = host.replace("tcp:", "").rsplit(":", 1)
+    pa_host = parts[0] if parts else "host.docker.internal"
+    pa_port = int(parts[1]) if len(parts) > 1 else 4713
+    try:
+        with socket.create_connection((pa_host, pa_port), timeout=1):
+            return True
+    except (OSError, ConnectionRefusedError, TimeoutError):
+        return False
 
 
 def _parse_args() -> argparse.Namespace:
@@ -47,8 +62,8 @@ def _parse_args() -> argparse.Namespace:
         help="Path to index.db (default: data/processed/index.db).",
     )
     p.add_argument(
-        "--ui-backend", choices=["cv2", "none"], default="cv2",
-        help="UI backend (default: cv2). Use 'none' for headless batch runs.",
+        "--ui-backend", choices=["dpg", "cv2", "none"], default="dpg",
+        help="UI backend (default: dpg). Use 'cv2' for legacy OpenCV or 'none' for headless.",
     )
     p.add_argument(
         "--target-fps", type=float, default=30.0,
@@ -65,6 +80,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--no-audio", action="store_true",
         help="Disable audio feedback.",
+    )
+    p.add_argument(
+        "--audio", action="store_true", default=False,
+        help="Explicitly enable audio (default). Checks PulseAudio connectivity on startup.",
     )
     p.add_argument(
         "--no-dashboard", action="store_true",
@@ -92,6 +111,19 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
 
+    # Audio: --audio is default-on; --no-audio disables it
+    enable_audio = not args.no_audio
+
+    if enable_audio:
+        if _check_pulseaudio():
+            print("[run_scenario] PulseAudio server detected — audio enabled.")
+        else:
+            print(
+                "[run_scenario] WARNING: PulseAudio server not reachable on host.\n"
+                "  Audio will fall back to terminal bell (may be silent).\n"
+                "  To enable audio, run on Windows host:  scripts\\start_pulseaudio.bat"
+            )
+
     # Resolve paths relative to project root
     dataset_root = args.dataset_root
     index_path = args.index_path
@@ -108,7 +140,7 @@ def main() -> None:
         target_fps=args.target_fps,
         context_interval=args.context_interval,
         ui_backend=args.ui_backend,
-        enable_audio=not args.no_audio,
+        enable_audio=enable_audio,
         max_frames=args.max_frames,
         show_dashboard=not args.no_dashboard,
         show_lanes=not args.no_lanes,

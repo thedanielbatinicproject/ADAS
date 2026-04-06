@@ -12,9 +12,12 @@ Install simpleaudio for reliable audio: pip install simpleaudio
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
+_log = logging.getLogger(__name__)
+_audio_warned = False
 
 
 # ---------------------------------------------------------------------------
@@ -74,9 +77,18 @@ def _beep_sequence(freq_hz: int, duration_s: float, pause_s: float, repeats: int
 
 
 def _single_beep(freq_hz: int, duration_s: float) -> None:
-    """Play one beep. Tries simpleaudio first, then system fallback."""
+    """Play one beep. Tries simpleaudio, PulseAudio, then system fallback."""
+    global _audio_warned
     if _try_simpleaudio(freq_hz, duration_s):
         return
+    if _try_pulseaudio(freq_hz, duration_s):
+        return
+    if not _audio_warned:
+        _audio_warned = True
+        _log.warning(
+            "Audio unavailable. For sound in Docker, start PulseAudio on "
+            "the host:  scripts/start_pulseaudio.bat  (see README)."
+        )
     _try_system_beep()
 
 
@@ -92,6 +104,35 @@ def _try_simpleaudio(freq_hz: int, duration_s: float) -> bool:
         play_obj = sa.play_buffer(wave, 1, 2, sample_rate)
         play_obj.wait_done()
         return True
+    except Exception:
+        return False
+
+
+def _try_pulseaudio(freq_hz: int, duration_s: float) -> bool:
+    """Try to play a sine-wave beep via PulseAudio (paplay).
+
+    Works inside Docker when the host PulseAudio socket is mounted.
+    Returns True on success.
+    """
+    try:
+        import subprocess
+        import numpy as np
+
+        sample_rate = 44100
+        t = np.linspace(0, duration_s, int(sample_rate * duration_s), endpoint=False)
+        wave = (np.sin(2 * np.pi * freq_hz * t) * 32767 * 0.6).astype(np.int16)
+
+        proc = subprocess.Popen(
+            ["paplay", "--raw", "--format=s16le", "--channels=1",
+             f"--rate={sample_rate}"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        proc.stdin.write(wave.tobytes())  # type: ignore[union-attr]
+        proc.stdin.close()  # type: ignore[union-attr]
+        proc.wait(timeout=duration_s + 2.0)
+        return proc.returncode == 0
     except Exception:
         return False
 

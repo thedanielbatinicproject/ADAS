@@ -271,6 +271,8 @@ def main() -> int:
     p.add_argument("--window-name", default="DADA2000 Player", help="OpenCV window name")
     p.add_argument("--max-width", type=int, default=1280,
                    help="Max display width in pixels; frames wider than this are scaled down (default: 1280)")
+    p.add_argument("--ui-backend", choices=["dpg", "cv2"], default="dpg",
+                   help="UI backend (default: dpg). 'cv2' for legacy OpenCV window.")
     args = p.parse_args()
 
     if cv2 is None:
@@ -305,7 +307,47 @@ def main() -> int:
     gpu_info = "CUDA" if _USE_CUDA else ("OpenCL" if _HAS_OPENCL else "CPU")
     print(ctext(f"[INFO] GPU backend: {gpu_info}  max_display_width={args.max_width}", C_GREEN), flush=True)
 
-    # Suppress Qt bundled-font-dir warnings by pointing to system fonts
+    # ── DPG backend ─────────────────────────────────────────────────────
+    if args.ui_backend == "dpg":
+        from adas.ui.player import create_player, run_player_loop
+
+        player = create_player("dpg", window_name=args.window_name, max_display_width=args.max_width)
+
+        def _overlay_dpg(display, idx):
+            lbl = frame_label(idx, annotation)
+            color = _LABEL_COLORS.get(lbl, (150, 150, 150))
+            text = f"cat={args.category_id} vid={args.video_id}  [{lbl}]"
+            cv2.putText(display, text, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 0), 4)
+            cv2.putText(display, text, (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 2)
+            return display
+
+        def _stats_dpg(idx):
+            stats: Dict[str, Any] = {}
+            if annotation is not None:
+                af = annotation.get("accident_frame")
+                bs = annotation.get("abnormal_start_frame")
+                be = annotation.get("abnormal_end_frame")
+                if af is not None:
+                    stats["accident_frame"] = str(af)
+                if bs is not None and be is not None:
+                    stats["abnormal_range"] = f"{bs} \u2013 {be}"
+            return stats
+
+        fps = (1000.0 / args.delay_ms) if args.delay_ms > 0 else 0.0
+        start = time.time()
+        shown = run_player_loop(
+            frame_refs, parser.get_frame,
+            player=player,
+            overlay_fn=_overlay_dpg,
+            stats_fn=_stats_dpg,
+            frame_label_fn=lambda idx: frame_label(idx, annotation),
+            target_fps=fps,
+        )
+        elapsed = max(time.time() - start, 1e-6)
+        print(ctext(f"\n[INFO] Playback finished. frames_shown={shown}, avg_fps={shown / elapsed:.2f}", C_GREEN))
+        return 0
+
+    # ── CV2 backend (legacy) ────────────────────────────────────────────
     if not os.environ.get("QT_QPA_FONTDIR"):
         for _fd in ("/usr/share/fonts", "/usr/share/fonts/truetype"):
             if os.path.isdir(_fd):

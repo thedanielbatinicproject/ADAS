@@ -86,6 +86,22 @@ def run_scenario(config: ScenarioConfig, *, log_file: Optional[str] = None) -> N
     # Trust discovered frame count for UI seek/slider range.
     n_frames = len(frame_items)
 
+    # ---- Pre-cache frames into RAM ----
+    import sys as _sys
+    _frame_cache: Dict[int, Any] = {}
+    for _ci, (_fi, _fr) in enumerate(frame_items):
+        _img = parser.get_frame(_fr)
+        if _img is not None:
+            _frame_cache[_ci] = _img
+        if (_ci + 1) % 50 == 0 or _ci + 1 == n_frames:
+            _pct = 100.0 * (_ci + 1) / n_frames
+            print(
+                f"\r[cache] Loading frames: {_ci + 1}/{n_frames} ({_pct:.0f}%)",
+                end="", file=_sys.stderr, flush=True,
+            )
+    if n_frames > 0:
+        print(file=_sys.stderr)
+
     # ---- Pipeline components ----
     ctx_config = DEFAULT_CONFIG
     prev_ctx_state: Any = None
@@ -95,10 +111,22 @@ def run_scenario(config: ScenarioConfig, *, log_file: Optional[str] = None) -> N
 
     # ---- UI setup ----
     player = None
-    if config.ui_backend == "cv2":
+    _use_native_stats = False
+    win_title = f"ADAS | cat={config.category_id} vid={config.video_id}"
+    if config.ui_backend == "dpg":
+        from adas.ui.backend_dpg import DpgPlayer
+        from adas.ui.types import UIState
+        player = DpgPlayer(window_name=win_title)
+        ui_state = UIState(
+            is_playing=True,
+            current_frame_idx=0,
+            total_frames=n_frames,
+        )
+        _use_native_stats = True
+    elif config.ui_backend == "cv2":
         from adas.ui.backend_cv2 import Cv2Player
         from adas.ui.types import UIState
-        player = Cv2Player(window_name=f"ADAS | cat={config.category_id} vid={config.video_id}")
+        player = Cv2Player(window_name=win_title)
         ui_state = UIState(
             is_playing=True,
             current_frame_idx=0,
@@ -129,8 +157,8 @@ def run_scenario(config: ScenarioConfig, *, log_file: Optional[str] = None) -> N
 
         t_loop_start = time.monotonic()
 
-        # ---- Get frame ----
-        frame = parser.get_frame(frame_ref)
+        # ---- Get frame (from RAM cache) ----
+        frame = _frame_cache.get(cursor)
         if frame is None:
             cursor += 1
             continue
@@ -243,7 +271,10 @@ def run_scenario(config: ScenarioConfig, *, log_file: Optional[str] = None) -> N
                     best_ttc, best_risk, annotation_label, frame_count,
                     t_loop_start,
                 )
-                display_frame = draw_stats_panel(display_frame, stats)
+                if _use_native_stats:
+                    player.update_stats(stats)
+                else:
+                    display_frame = draw_stats_panel(display_frame, stats)
 
             ui_state.current_frame_idx = frame_idx
             if n_frames > 0:

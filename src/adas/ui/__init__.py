@@ -17,6 +17,12 @@ from .backend_cv2 import Cv2Player
 from .overlays import draw_lanes, draw_obstacles, draw_risk
 from .dashboard import draw_stats_panel, draw_stats_overlay
 from .audio import play_warning_beep, play_brake_beep
+from .player import create_player, run_player_loop
+
+try:
+    from .backend_dpg import DpgPlayer
+except ImportError:
+    DpgPlayer = None  # type: ignore[assignment,misc]
 
 __all__ = [
     # types
@@ -34,4 +40,7 @@ __all__ = [
     # audio
     "play_warning_beep",
     "play_brake_beep",
+    # player
+    "create_player",
+    "run_player_loop",
 ]

@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# System dependencies + LaTeX
+# System dependencies + LaTeX + audio
 RUN apt-get update && apt-get install -y \
     git \
     curl \
@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y \
     libxrender1 \
     libxkbcommon-x11-0 \
     libxcb-xinerama0 \
+    pulseaudio-utils \
     texlive-full \
     && rm -rf /var/lib/apt/lists/*
 

@@ -140,6 +140,10 @@ celerybeat.pid
 data/raw/
 data/processed/
 
+# Include bundled dependencies (PulseAudio binaries etc.)
+!dep/
+!dep/**
+
 # DVC
 /data.dvc
 

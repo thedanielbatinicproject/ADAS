@@ -36,7 +36,9 @@ Kada se VS Code otvori, kliknite **"Reopen in Container"** ili:
 
 #### Dodatna dokumentacija
 Detaljnije o projektnim specifikacijama pročitajte [ovdje](/docs/other/ProjectSpecifications.md).
+
 Opis lokalne indeksirane baze (records + annotations), svih stupaca i primjera poziva dostupan je u [docs/other/IndexDatabase.md](docs/other/IndexDatabase.md).
+
 Popis skripti za pokretanje testova i ostalih modula nalazi se u [docs/other/runSomeScripts.md](docs/other/runSomeScripts.md). Za svaku skriptu se podrazumijeva da ste pozicionirani u root direktoriju projekta, što je u docker kontenjeru "root@cont-id:/app".
 
 
@@ -68,5 +70,30 @@ python scripts/dataset/play_index_video.py \
 ```
 
 Ako se GUI ne otvori, provjerite da je VcXsrv pokrenut i da je firewall dopustio pristup.
+
+
+## Opcionalno: Audio u Dockeru (Windows Host)
+
+Docker kontejner nema pristup zvučnoj kartici hosta. Za audio upozorenja (kočenje, upozorenje) PulseAudio server mora biti pokrenut na Windows hostu.
+
+PulseAudio je uključen u repozitorij (`dep/pulseaudio-1.1`) — **nije potrebna posebna instalacija**.
+
+1. Na Windows hostu pokrenite batch skriptu iz korijena projekta:
+
+```
+scripts\start_pulseaudio.bat
+```
+
+2. Ostavite taj prozor otvoren dok koristite Docker kontejner.
+
+3. U containeru pokrenite ADAS scenario s audiom:
+
+```bash
+python scripts/run_scenario.py --category-id 1 --video-id 1
+```
+
+Audio je uključen po defaultu. Za pokretanje bez zvuka dodajte `--no-audio`.
+
+> Bez pokrenutog PulseAudio servera zvuk neće raditi, ali sve ostale funkcionalnosti (video, detekcija, dashboard) rade normalno.
 
 
