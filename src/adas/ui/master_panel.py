@@ -142,12 +142,13 @@ class MasterDashboard:
                 dpg.add_text("page 0/0", tag="page_info", color=(190, 190, 190))
 
             dpg.add_spacer(height=5)
-            with dpg.collapsing_header(label="Column Filters", default_open=True):
+            with dpg.collapsing_header(label="Column Filters", default_open=False):
                 dpg.add_text("Enum-like columns are filterable here. Free text columns are display-only.", color=(170, 170, 170))
-                dpg.add_group(tag="enum_filter_group")
+                with dpg.child_window(height=100, border=False):
+                    dpg.add_group(tag="enum_filter_group")
 
             dpg.add_spacer(height=5)
-            with dpg.child_window(height=-1, border=False):
+            with dpg.child_window(height=400, border=False):
                 dpg.add_table(
                     tag="video_table",
                     header_row=True,
@@ -355,14 +356,15 @@ class MasterDashboard:
         if not self._has_started_setup:
             self._startup_log("setup started", (100, 220, 100))
             self._has_started_setup = True
-        ok = True
+        docker_ok = True
+        runtime_ok = True
 
         self._startup_log("[check] docker executable", (160, 210, 255))
         docker_bin = shutil.which("docker")
         if docker_bin:
             self._startup_log(f"docker found: {docker_bin}", (100, 220, 100))
         else:
-            ok = False
+            docker_ok = False
             self._startup_log("docker not found in PATH", (255, 120, 120))
 
         if docker_bin:
@@ -371,7 +373,7 @@ class MasterDashboard:
             if rc_info == 0:
                 self._startup_log(f"docker daemon OK: {out_info.strip()}", (100, 220, 100))
             else:
-                ok = False
+                docker_ok = False
                 self._startup_log("docker daemon not reachable", (255, 120, 120))
 
             compose_path = os.path.join(self.project_root, "docker-compose.yml")
@@ -379,7 +381,7 @@ class MasterDashboard:
             if os.path.exists(compose_path):
                 self._startup_log(f"compose file found: {compose_path}", (100, 220, 100))
             else:
-                ok = False
+                docker_ok = False
                 self._startup_log("docker-compose.yml not found", (255, 120, 120))
 
             self._startup_log("[check] compose service", (160, 210, 255))
@@ -387,7 +389,7 @@ class MasterDashboard:
             if rc_services == 0 and self.service_name in out_services.split():
                 self._startup_log(f"compose service OK: {self.service_name}", (100, 220, 100))
             else:
-                ok = False
+                docker_ok = False
                 self._startup_log(f"compose service '{self.service_name}' missing", (255, 120, 120))
 
         if os.name == "nt":
@@ -401,17 +403,17 @@ class MasterDashboard:
                         subprocess.Popen(["cmd", "/c", pa_bat], cwd=self.project_root)
                         time.sleep(1.0)
                     except Exception as exc:
-                        ok = False
+                        runtime_ok = False
                         self._startup_log(f"PulseAudio start failed: {exc}", (255, 120, 120))
 
                 if self._is_port_open("127.0.0.1", 4713):
                     self._startup_log("PulseAudio TCP port 4713 reachable", (100, 220, 100))
                 else:
-                    ok = False
-                    self._startup_log("PulseAudio TCP port 4713 not reachable", (255, 120, 120))
+                    runtime_ok = False
+                    self._startup_log("PulseAudio TCP port 4713 not reachable (warning - GUI may not work)", (255, 180, 120))
             else:
-                ok = False
-                self._startup_log("PulseAudio script missing", (255, 120, 120))
+                runtime_ok = False
+                self._startup_log("PulseAudio script missing (warning - GUI may not work)", (255, 180, 120))
         else:
             self._startup_log("PulseAudio host start skipped (non-Windows runtime)", (220, 220, 140))
 
@@ -419,8 +421,8 @@ class MasterDashboard:
         if self._is_x_server_ready_windows():
             self._startup_log("X server check: OK", (100, 220, 100))
         else:
-            ok = False
-            self._startup_log("X server check: failed. Start VcXsrv and retry.", (255, 120, 120))
+            runtime_ok = False
+            self._startup_log("X server check: failed (warning - GUI may not work)", (255, 180, 120))
 
         if docker_bin and not check_only:
             self._startup_log("[check] docker image", (160, 210, 255))
@@ -434,7 +436,7 @@ class MasterDashboard:
                 if rc_build == 0:
                     self._startup_log("docker build completed", (100, 220, 100))
                 else:
-                    ok = False
+                    docker_ok = False
                     self._startup_log("docker build failed", (255, 120, 120))
                     for line in out_build.splitlines()[-8:]:
                         self._startup_log(f"  {line}", (255, 160, 160))
@@ -455,10 +457,10 @@ class MasterDashboard:
                         for line in out_ps.splitlines()[-3:]:
                             self._startup_log(f"  {line}", (170, 220, 170))
                     else:
-                        ok = False
+                        docker_ok = False
                         self._startup_log("container not reported as running", (255, 120, 120))
                 else:
-                    ok = False
+                    docker_ok = False
                     self._startup_log("docker compose up -d adas -> failed", (255, 120, 120))
                     for line in out.splitlines()[-8:]:
                         self._startup_log(f"  {line}", (255, 160, 160))
@@ -469,10 +471,13 @@ class MasterDashboard:
 
         self._reload_table_data(show_message=False)
 
-        if ok:
-            self._startup_log("startup checks completed", (100, 220, 100))
+        if docker_ok:
+            self._startup_log("startup completed", (100, 220, 100))
         else:
-            self._startup_log("startup incomplete, fix warnings and Retry Checks", (255, 200, 120))
+            self._startup_log("CRITICAL: Docker setup incomplete. Fix errors and Retry Checks.", (255, 100, 100))
+        
+        if not runtime_ok:
+            self._startup_log("WARNING: Some runtime features unavailable (GUI/audio may not work fully)", (255, 180, 120))
 
     def _copy_startup_log(self) -> None:
         text = "\n".join([line for line, _ in self.startup_log_lines])
