@@ -80,7 +80,7 @@ def _load_record(index_path: str, category_id: int, video_id: int):
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute(
-        "SELECT * FROM records WHERE category_id = ? AND video_id = ? LIMIT 1",
+        "SELECT * FROM records WHERE category_id = ? AND video_id = ? AND record_id LIKE '%/images' LIMIT 1",
         (category_id, video_id),
     )
     row = cur.fetchone()

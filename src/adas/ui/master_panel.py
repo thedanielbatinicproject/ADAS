@@ -62,6 +62,8 @@ class MasterDashboard:
         self._process_on_exit: Optional[Callable[[int], None]] = None
         self._active_kill_pattern: Optional[str] = None
         self.startup_log_lines: List[Tuple[str, Tuple[int, int, int]]] = []
+        self._startup_queue: queue.Queue[Tuple[str, Tuple[int, int, int]]] = queue.Queue()
+        self._docker_setup_running = False
         self._hidden_columns: set = {
             "maps_path", "type", "abnormal_start_frame", "total_frames",
             "interval_0_tai", "interval_tai_tco", "interval_tai_tae",
@@ -81,6 +83,7 @@ class MasterDashboard:
         self._reload_table_data(show_message=True)
 
         while dpg.is_dearpygui_running():
+            self._drain_startup_output()
             self._drain_process_output()
             self._poll_process_end()
             dpg.render_dearpygui_frame()
@@ -95,6 +98,14 @@ class MasterDashboard:
                 dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, (90, 140, 220))
                 dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, (70, 120, 200))
         self._row_highlight_theme = row_theme
+
+        with dpg.theme() as sel_btn_theme:
+            with dpg.theme_component(dpg.mvButton):
+                dpg.add_theme_color(dpg.mvThemeCol_Button, (30, 140, 40))
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (40, 170, 50))
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (30, 140, 40))
+                dpg.add_theme_color(dpg.mvThemeCol_Text, (255, 255, 255))
+        self._selected_btn_theme = sel_btn_theme
 
         with dpg.theme() as table_theme:
             with dpg.theme_component(dpg.mvChildWindow):
@@ -160,6 +171,7 @@ class MasterDashboard:
                 dpg.add_table(
                     tag="video_table",
                     header_row=True,
+                    freeze_rows=1,
                     row_background=True,
                     borders_innerH=True,
                     borders_outerH=True,
@@ -173,8 +185,8 @@ class MasterDashboard:
             dpg.bind_item_theme("table_card", self._table_card_theme)
 
     def _build_actions_panel(self) -> None:
-        with dpg.child_window(width=480, height=-1, border=True, tag="actions_panel"):
-            dpg.add_text("Selected Video (OV)", color=(200, 220, 255))
+        with dpg.child_window(width=440, height=-1, border=True, tag="actions_panel"):
+            dpg.add_text("Selected Video", color=(200, 220, 255))
             dpg.add_text("None", tag="selected_video_label", color=(255, 255, 255))
             dpg.add_separator()
 
@@ -349,18 +361,42 @@ class MasterDashboard:
             with dpg.child_window(tag="startup_log_child", height=250, border=True):
                 dpg.add_group(tag="startup_log_group")
             with dpg.group(horizontal=True):
-                dpg.add_button(label="RUN DOCKER", width=220, height=42, callback=self._on_run_docker)
-                dpg.add_button(label="Retry Checks", width=220, height=42, callback=lambda: self._on_run_docker(check_only=True))
-                dpg.add_button(label="Copy Log", width=220, height=42, callback=self._copy_startup_log)
-                dpg.add_button(label="Continue", width=220, height=42, callback=lambda: dpg.configure_item("startup_overlay", show=False))
+                dpg.add_button(label="RUN DOCKER", width=220, height=42, callback=lambda s, a, u: self._on_run_docker(check_only=False))
+                dpg.add_button(label="Retry Checks", width=220, height=42, callback=lambda s, a, u: self._on_run_docker(check_only=True))
+                dpg.add_button(label="Copy Log", width=220, height=42, callback=lambda s, a, u: self._copy_startup_log())
+                dpg.add_button(label="Continue", width=220, height=42, callback=lambda s, a, u: dpg.configure_item("startup_overlay", show=False))
 
     def _startup_log(self, line: str, color: Tuple[int, int, int] = (220, 220, 220)) -> None:
-        self.startup_log_lines.append((line, color))
-        dpg.add_text(line, parent="startup_log_group", color=color)
-        y_max = dpg.get_y_scroll_max("startup_log_child")
-        dpg.set_y_scroll("startup_log_child", y_max)
+        self._startup_queue.put((line, color))
+
+    def _drain_startup_output(self) -> None:
+        drained = 0
+        while drained < 200:
+            try:
+                line, color = self._startup_queue.get_nowait()
+            except queue.Empty:
+                break
+            self.startup_log_lines.append((line, color))
+            dpg.add_text(line, parent="startup_log_group", color=color)
+            y_max = dpg.get_y_scroll_max("startup_log_child")
+            dpg.set_y_scroll("startup_log_child", y_max)
+            drained += 1
 
     def _on_run_docker(self, check_only: bool = False) -> None:
+        if self._docker_setup_running:
+            self._startup_log("Docker setup already running, please wait...", (255, 200, 120))
+            return
+        self._docker_setup_running = True
+        t = threading.Thread(target=self._run_docker_checks, args=(check_only,), daemon=True)
+        t.start()
+
+    def _run_docker_checks(self, check_only: bool = False) -> None:
+        try:
+            self._run_docker_checks_inner(check_only)
+        finally:
+            self._docker_setup_running = False
+
+    def _run_docker_checks_inner(self, check_only: bool = False) -> None:
         if not self._has_started_setup:
             self._startup_log("setup started", (100, 220, 100))
             self._has_started_setup = True
@@ -405,37 +441,35 @@ class MasterDashboard:
             pa_bat = os.path.join(self.project_root, "scripts", "start_pulseaudio.bat")
             if os.path.exists(pa_bat):
                 self._startup_log(f"PulseAudio script found: {pa_bat}", (100, 220, 100))
-                if not check_only:
-                    self._startup_log("attempting to start: cmd /c start_pulseaudio.bat", (170, 220, 170))
-                    try:
-                        proc = subprocess.Popen(["cmd", "/c", pa_bat], cwd=self.project_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                        time.sleep(2.0)
-                        retcode = proc.poll()
-                        if retcode is None:
-                            self._startup_log("PulseAudio process started (still running)", (170, 220, 170))
-                        elif retcode == 0:
-                            self._startup_log("PulseAudio process exited with code 0 (success)", (100, 220, 100))
-                        else:
-                            _, err = proc.communicate()
-                            self._startup_log(f"PulseAudio process exited with code {retcode}: {err[:100]}", (255, 150, 120))
-                    except Exception as exc:
-                        runtime_ok = False
-                        self._startup_log(f"PulseAudio start failed: {type(exc).__name__}: {exc}", (255, 120, 120))
-
-                    self._startup_log("waiting for PulseAudio TCP port 4713...", (200, 200, 100))
-                    for attempt in range(5):
-                        if self._is_port_open("127.0.0.1", 4713):
-                            self._startup_log(f"PulseAudio TCP port 4713 reachable (attempt {attempt+1}/5)", (100, 220, 100))
-                            break
-                        else:
-                            self._startup_log(f"Port check {attempt+1}/5: 127.0.0.1:4713 not reachable", (200, 180, 100))
-                            if attempt < 4:
-                                time.sleep(0.5)
+                self._startup_log("attempting to start: cmd /c start_pulseaudio.bat", (170, 220, 170))
+                try:
+                    proc = subprocess.Popen(["cmd", "/c", pa_bat], cwd=self.project_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    time.sleep(2.0)
+                    retcode = proc.poll()
+                    if retcode is None:
+                        self._startup_log("PulseAudio process started (still running)", (170, 220, 170))
+                    elif retcode == 0:
+                        self._startup_log("PulseAudio process exited with code 0 (success)", (100, 220, 100))
                     else:
-                        runtime_ok = False
-                        self._startup_log("PulseAudio TCP port 4713 still not reachable after 5 attempts (warning - GUI may not work)", (255, 180, 120))
+                        _, err = proc.communicate()
+                        self._startup_log(f"PulseAudio process exited with code {retcode}: {err[:100]}", (255, 150, 120))
+                except Exception as exc:
+                    runtime_ok = False
+                    self._startup_log(f"PulseAudio start failed: {type(exc).__name__}: {exc}", (255, 120, 120))
+
+                self._startup_log("waiting for PulseAudio TCP port 4713...", (200, 200, 100))
+                for attempt in range(5):
+                    if self._is_port_open("127.0.0.1", 4713):
+                        self._startup_log(f"PulseAudio TCP port 4713 reachable (attempt {attempt+1}/5)", (100, 220, 100))
+                        break
+                    else:
+                        self._startup_log(f"Port check {attempt+1}/5: 127.0.0.1:4713 not reachable", (200, 180, 100))
+                        if attempt < 4:
+                            time.sleep(0.5)
                 else:
-                    self._startup_log("PulseAudio startup skipped (check_only mode)", (220, 220, 140))
+                    runtime_ok = False
+                    self._startup_log("PulseAudio TCP port 4713 still not reachable after 5 attempts (warning - GUI may not work)", (255, 180, 120))
+
             else:
                 runtime_ok = False
                 self._startup_log("PulseAudio script missing (warning - GUI may not work)", (255, 180, 120))
@@ -451,13 +485,13 @@ class MasterDashboard:
 
         if docker_bin and not check_only:
             self._startup_log("[check] docker image", (160, 210, 255))
-            rc_img, out_img = self._run_short_command(["docker", "images", "--filter", f"reference=adas:latest", "--quiet"])
+            rc_img, out_img = self._run_short_command(["docker", "images", "--filter", "reference=adas:latest", "--quiet"])
             if rc_img == 0 and out_img.strip():
                 self._startup_log("docker image adas:latest found", (100, 220, 100))
             else:
                 self._startup_log("docker image adas:latest not found, building...", (200, 200, 100))
                 self._startup_log("running docker compose build (this may take a while)...", (200, 200, 100))
-                rc_build, out_build = self._run_short_command(["docker", "compose", "build", self.service_name])
+                rc_build, out_build = self._run_short_command(["docker", "compose", "build", self.service_name], timeout=600)
                 if rc_build == 0:
                     self._startup_log("docker build completed", (100, 220, 100))
                 else:
@@ -499,8 +533,6 @@ class MasterDashboard:
         else:
             self._startup_log("docker executable not found in PATH", (255, 160, 160))
 
-        self._reload_table_data(show_message=False)
-
         if docker_ok:
             self._startup_log("startup completed", (100, 220, 100))
         else:
@@ -536,9 +568,10 @@ class MasterDashboard:
         try:
             vp_w = dpg.get_viewport_client_width() or 1680
             vp_h = dpg.get_viewport_client_height() or 980
-            panel_w = 480
-            table_w = max(800, vp_w - panel_w - 20)
-            h = max(500, vp_h - 10)
+            panel_w = 440
+            table_w = max(800, vp_w - panel_w - 40)
+            # Keep a small bottom margin so the root window itself never needs to scroll.
+            h = max(500, vp_h - 28)
             if dpg.does_item_exist("table_card"):
                 dpg.configure_item("table_card", width=table_w, height=h)
             if dpg.does_item_exist("actions_panel"):
@@ -553,10 +586,12 @@ class MasterDashboard:
         except OSError:
             return False
 
-    def _run_short_command(self, cmd: Sequence[str]) -> Tuple[int, str]:
+    def _run_short_command(self, cmd: Sequence[str], timeout: int = 15) -> Tuple[int, str]:
         try:
-            p = subprocess.run(cmd, cwd=self.project_root, capture_output=True, text=True, timeout=90)
+            p = subprocess.run(cmd, cwd=self.project_root, capture_output=True, text=True, timeout=timeout)
             return p.returncode, (p.stdout or "") + (p.stderr or "")
+        except subprocess.TimeoutExpired:
+            return 1, f"Command timed out after {timeout}s"
         except Exception as exc:
             return 1, str(exc)
 
@@ -835,15 +870,18 @@ class MasterDashboard:
         for i, row in enumerate(self.page_rows):
             row_tag = f"table_row_{i}"
             self._table_tags.append(row_tag)
+            is_selected = self._row_uid(row) == self.selected_row_id
             with dpg.table_row(parent=table, tag=row_tag):
-                sel_label = "Selected" if self._row_uid(row) == self.selected_row_id else "Select"
-                dpg.add_button(
+                sel_label = "SELECTED" if is_selected else "Select"
+                btn = dpg.add_button(
                     label=sel_label,
                     user_data=row,
                     callback=lambda _s, _a, r: self._on_select_row(r),
                     width=-1,
                     height=22,
                 )
+                if is_selected and self._selected_btn_theme is not None:
+                    dpg.bind_item_theme(btn, self._selected_btn_theme)
                 for col in visible_cols:
                     display = self._format_cell(col, row.get(col))
                     if col == "measures":
@@ -851,7 +889,7 @@ class MasterDashboard:
                     else:
                         dpg.add_text(display)
 
-            if self._row_uid(row) == self.selected_row_id and self._row_highlight_theme is not None:
+            if is_selected and self._row_highlight_theme is not None:
                 dpg.bind_item_theme(row_tag, self._row_highlight_theme)
 
     def _row_uid(self, row: Optional[Dict[str, Any]]) -> str:
@@ -870,7 +908,7 @@ class MasterDashboard:
             dpg.set_value("selected_video_label", f"category_id={cat}, video_id={vid}, record_id={row.get('record_id')}")
             dpg.set_value("run_scenario_category", f"category_id: {cat}")
             dpg.set_value("run_scenario_video", f"video_id: {vid}")
-        except Exception as exc:
+        except Exception:
             pass
         self._render_table()
 
@@ -1076,7 +1114,7 @@ class MasterDashboard:
         self._start_process("Pytest", cmd)
 
     def _docker_exec_cmd(self, tail_cmd: List[str]) -> List[str]:
-        return ["docker", "compose", "exec", "-T", self.service_name] + tail_cmd
+        return ["docker", "compose", "exec", "-T", "-e", "PYTHONUNBUFFERED=1", self.service_name] + tail_cmd
 
     def _start_process(self, title: str, cmd: List[str], on_exit: Optional[Any] = None) -> None:
         if self.process.running:
@@ -1089,6 +1127,9 @@ class MasterDashboard:
         self.process.lines.clear()
         self.process.title = title
 
+        # Minimize master panel so the spawned GUI window gets focus
+        dpg.minimize_viewport()
+
         color = (140, 200, 255)
         self._append_process_line("$ " + " ".join(shlex.quote(p) for p in cmd), color)
         self._active_kill_pattern = self._extract_kill_pattern(cmd)
@@ -1099,6 +1140,8 @@ class MasterDashboard:
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            encoding="utf-8",
+            errors="replace",
         )
         if os.name != "nt":
             kwargs["preexec_fn"] = os.setsid
@@ -1188,6 +1231,16 @@ class MasterDashboard:
         if code is None:
             return
 
+        # Drain any remaining output from the reader thread
+        if self.process.reader_thread is not None:
+            self.process.reader_thread.join(timeout=2.0)
+        while True:
+            try:
+                line, col = self.process.queue.get_nowait()
+                self._append_process_line(line, col)
+            except queue.Empty:
+                break
+
         self.process.running = False
         status_col = (120, 255, 120) if code == 0 else (255, 130, 130)
         self._append_process_line(f"[exit] return code: {code}", status_col)
@@ -1252,6 +1305,7 @@ class MasterDashboard:
             self._show_toast("Process is still running. Cancel first.")
             return
         dpg.configure_item("process_overlay", show=False)
+        dpg.maximize_viewport()
 
     def _copy_process_log(self) -> None:
         text = "\n".join([line for line, _ in self.process.lines])
