@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass
-from typing import Optional
 
 
 class SystemAction(enum.Enum):

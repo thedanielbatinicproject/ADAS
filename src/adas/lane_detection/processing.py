@@ -17,7 +17,7 @@ The pipeline:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Optional, Tuple, List
 
 import numpy as np

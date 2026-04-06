@@ -13,7 +13,7 @@ import os
 import sqlite3
 import sys
 import time
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, Optional, Tuple
 
 from .types import ScenarioConfig, FrameResult
 from .events import ScenarioEvent, EventType, log_event
@@ -35,7 +35,7 @@ def run_scenario(config: ScenarioConfig, *, log_file: Optional[str] = None) -> N
     """
     _ensure_src_on_path()
 
-    from adas.dataset import parser, indexer
+    from adas.dataset import parser  # noqa: F811
     from adas.context.defaults import DEFAULT_CONFIG
     from adas.lane_detection import process_frame
     from adas.obstacle_detection.detector import Detector
@@ -165,7 +165,6 @@ def run_scenario(config: ScenarioConfig, *, log_file: Optional[str] = None) -> N
         prev_mode = ctx_state.mode
 
         # ---- Lane detection ----
-        from adas.lane_detection import process_frame
         lane_output = process_frame(frame, ctx_state)
 
         # ---- Obstacle detection + tracking ----
@@ -209,7 +208,7 @@ def run_scenario(config: ScenarioConfig, *, log_file: Optional[str] = None) -> N
         annotation_label = _get_frame_label(annotation, frame_idx)
 
         # ---- Compose frame result ----
-        result = FrameResult(
+        _result = FrameResult(
             frame_idx=frame_idx,
             timestamp_s=timestamp_s,
             lane_output=lane_output,

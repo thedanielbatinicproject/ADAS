@@ -125,7 +125,6 @@ class RiskEstimator:
         """
         braking_mult = 1.0
         lane_width_px: Optional[float] = None
-        frame_center_x: Optional[float] = None
 
         if context_state is not None and hasattr(context_state, "braking_multiplier"):
             braking_mult = float(context_state.braking_multiplier)
@@ -278,7 +277,6 @@ def _compute_lateral(
 
     elif lane_width_px is not None and lane_width_px > 10:
         # Rough center heuristic: assume lane center is at frame center
-        frame_cx = cx_px  # no better info available; treat as in-lane
         in_ego_lane = True
         lateral_offset_m = 0.0
 

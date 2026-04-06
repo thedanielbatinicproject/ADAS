@@ -6,7 +6,7 @@ BGR frame. Used by debug scripts and the UI overlay module.
 
 from __future__ import annotations
 
-from typing import Any, Optional, Tuple
+from typing import Any, Tuple
 
 import numpy as np
 

@@ -7,7 +7,7 @@ never modified in-place.
 
 from __future__ import annotations
 
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Tuple
 
 
 def draw_lanes(
@@ -151,8 +151,7 @@ def draw_risk(
     for risk in risks:
         score = risk.risk_score
         ttc = risk.ttc
-        cx = int(risk.lateral_offset_m)  # placeholder - centroid not in RiskResult
-        # Use a corner indicator instead since we don't have exact pixel pos
+        # Use a corner indicator since we don't have exact pixel pos
         if score >= threshold_brake:
             color = brake_color
             level = "BRAKE"
