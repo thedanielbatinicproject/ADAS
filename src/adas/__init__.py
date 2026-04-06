@@ -10,6 +10,8 @@ _submodules = (
     "lane_detection",
     "obstacle_detection",
     "collision_risk",
+    "ui",
+    "scenario",
     "utils",
 )
 __all__ = list(_submodules)

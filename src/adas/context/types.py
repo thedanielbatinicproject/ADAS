@@ -43,9 +43,9 @@ class WeatherCondition(enum.Enum):
 
     CLEAR   - good visibility, no precipitation cues
     GLARE   - overexposed / strong backlight
-    FOG     – degraded visibility, no wet-surface cue
-    RAIN    – degraded visibility with wet-surface indicator
-    UNKNOWN – insufficient data
+    FOG     - degraded visibility, no wet-surface cue
+    RAIN    - degraded visibility with wet-surface indicator
+    UNKNOWN - insufficient data
     """
 
     CLEAR = "clear"
