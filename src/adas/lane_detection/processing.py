@@ -50,7 +50,7 @@ class LaneOutput:
     """Result of geometric lane detection for one frame.
 
     Coordinates are in the original (full-frame) pixel space.
-    Polynomial coefficients are for x = a*y + b in ROI-relative space
+    Polynomial coefficients are for x = f(y) in ROI-relative space
     (y=0 at top of ROI, increasing downward).
 
     Attributes
@@ -64,7 +64,7 @@ class LaneOutput:
     left_confidence : float
     right_confidence : float
     left_poly : tuple[float, ...] or None
-        Coefficients (a, b) for left boundary: x = a*y + b in ROI space.
+        Coefficients for left boundary in ROI space (linear or quadratic).
     right_poly : tuple[float, ...] or None
     edges : numpy.ndarray or None
         Canny edge map of the ROI (uint8).
@@ -151,6 +151,15 @@ class LaneProcessingConfig:
     trapezoid_top_left: float = 0.40
     trapezoid_top_right: float = 0.60
     trapezoid_top_frac: float = 0.42
+
+    # Detection corridor constraints to avoid non-road lines (trees, rails)
+    min_line_mid_y_frac: float = 0.32
+    lane_min_width_frac: float = 0.18
+    lane_max_width_frac: float = 0.92
+    lane_expected_left_bottom_frac: float = 0.24
+    lane_expected_right_bottom_frac: float = 0.76
+    lane_expected_left_top_frac: float = 0.42
+    lane_expected_right_top_frac: float = 0.58
 
 
 DEFAULT_PROCESSING_CONFIG = apply_dataclass_overrides(LaneProcessingConfig(), "lane")
@@ -276,7 +285,7 @@ def process_frame(
 
     # Strategy: no lane markings expected -> synthetic trapezoid
     if mode_str in ("unmarked_good_vis", "unmarked_degraded"):
-        return _build_trapezoid(h, w, y1, y2, cfg)
+        return _build_trapezoid(h, w, y1, y2, cfg, mode_str=mode_str)
 
     # Strategy: degraded conditions -> adapted preprocessing
     use_degraded = (
@@ -302,7 +311,16 @@ def process_frame(
     )
 
     if lines is None:
-        return LaneOutput(edges=edges, roi_y1=y1, roi_y2=y2)
+        # Always provide a road surface in front of the ego vehicle.
+        return _build_trapezoid(
+            h,
+            w,
+            y1,
+            y2,
+            cfg,
+            mode_str=mode_str,
+            edges=edges,
+        )
 
     mid_x = w / 2.0
     roi_h = y2 - y1
@@ -325,12 +343,21 @@ def process_frame(
 
         seg_len = float(np.hypot(dx, dy))
         cx = (x1_l + x2_l) / 2.0
+        cy = (y1_l + y2_l) / 2.0
 
-        if slope < 0 and cx < mid_x:
+        # Focus only on road area in front of the vehicle.
+        if cy < roi_h * cfg.min_line_mid_y_frac:
+            continue
+
+        exp_left = _expected_lane_x(roi_h, w, float(cy), left=True, cfg=cfg)
+        exp_right = _expected_lane_x(roi_h, w, float(cy), left=False, cfg=cfg)
+        gate_px = w * 0.22
+
+        if slope < 0 and cx < mid_x and abs(cx - exp_left) <= gate_px:
             left_points.append((float(x1_l), float(y1_l)))
             left_points.append((float(x2_l), float(y2_l)))
             left_len_acc += seg_len
-        elif slope > 0 and cx > mid_x:
+        elif slope > 0 and cx > mid_x and abs(cx - exp_right) <= gate_px:
             right_points.append((float(x1_l), float(y1_l)))
             right_points.append((float(x2_l), float(y2_l)))
             right_len_acc += seg_len
@@ -338,8 +365,8 @@ def process_frame(
     left_conf = min(1.0, left_len_acc / cfg.max_accum_length)
     right_conf = min(1.0, right_len_acc / cfg.max_accum_length)
 
-    left_poly = _fit_line_poly(left_points) if len(left_points) >= 4 else None
-    right_poly = _fit_line_poly(right_points) if len(right_points) >= 4 else None
+    left_poly = _fit_lane_poly(left_points) if len(left_points) >= 4 else None
+    right_poly = _fit_lane_poly(right_points) if len(right_points) >= 4 else None
 
     left_detected = left_conf >= cfg.min_confidence
     right_detected = right_conf >= cfg.min_confidence
@@ -365,11 +392,28 @@ def process_frame(
     lane_width_px: Optional[float] = None
     if left_poly is not None and right_poly is not None:
         y_bot = float(roi_h - 1)
-        lx = left_poly[0] * y_bot + left_poly[1]
-        rx = right_poly[0] * y_bot + right_poly[1]
+        lx = _poly_eval(left_poly, y_bot)
+        rx = _poly_eval(right_poly, y_bot)
         w_est = abs(rx - lx)
         if 50 < w_est < w * 0.95:
             lane_width_px = w_est
+
+    # If lane geometry is weak or implausible, synthesize perspective road area.
+    width_ok = False
+    if lane_width_px is not None:
+        width_ok = (w * cfg.lane_min_width_frac) <= lane_width_px <= (w * cfg.lane_max_width_frac)
+    if (not has_lanes) or (not width_ok):
+        return _build_trapezoid(
+            h,
+            w,
+            y1,
+            y2,
+            cfg,
+            mode_str=mode_str,
+            edges=edges,
+            left_hint=left_poly,
+            right_hint=right_poly,
+        )
 
     mask = _build_lane_mask(
         roi_h, w, left_poly, right_poly, left_detected, right_detected
@@ -488,23 +532,53 @@ def _build_trapezoid(
     y1: int,
     y2: int,
     cfg: LaneProcessingConfig,
+    *,
+    mode_str: str = "",
+    edges: Any = None,
+    left_hint: Optional[Tuple[float, ...]] = None,
+    right_hint: Optional[Tuple[float, ...]] = None,
 ) -> LaneOutput:
-    """Build a synthetic forward-road trapezoid when no lane markings exist."""
+    """Build a perspective-adaptive forward-road area.
+
+    This fallback guarantees that the ego vehicle always has a plausible
+    road surface directly in front, even when line extraction fails.
+    """
     import cv2
 
     roi_h = y2 - y1
-
-    bx_l = int(w * cfg.trapezoid_bottom_left)
-    bx_r = int(w * cfg.trapezoid_bottom_right)
-
-    top_y_frame = int(h * cfg.trapezoid_top_frac)
-    top_y_roi = max(0, top_y_frame - y1)
-    tx_l = int(w * cfg.trapezoid_top_left)
-    tx_r = int(w * cfg.trapezoid_top_right)
+    geom = _estimate_road_geometry(
+        h,
+        w,
+        y1,
+        y2,
+        cfg,
+        edges=edges,
+        left_hint=left_hint,
+        right_hint=right_hint,
+    )
+    bx_l = geom["bx_l"]
+    bx_r = geom["bx_r"]
+    tx_l = geom["tx_l"]
+    tx_r = geom["tx_r"]
+    top_y_roi = geom["top_y_roi"]
     bot_y_roi = roi_h - 1
 
-    left_poly = _poly_from_two_points(top_y_roi, tx_l, bot_y_roi, bx_l)
-    right_poly = _poly_from_two_points(top_y_roi, tx_r, bot_y_roi, bx_r)
+    left_poly = _poly_from_three_points(
+        float(top_y_roi),
+        float(tx_l),
+        float((top_y_roi + bot_y_roi) * 0.5),
+        float((tx_l + bx_l) * 0.5 + geom["curve_bias"]),
+        float(bot_y_roi),
+        float(bx_l),
+    )
+    right_poly = _poly_from_three_points(
+        float(top_y_roi),
+        float(tx_r),
+        float((top_y_roi + bot_y_roi) * 0.5),
+        float((tx_r + bx_r) * 0.5 + geom["curve_bias"]),
+        float(bot_y_roi),
+        float(bx_r),
+    )
 
     lane_width_px = float(abs(bx_r - bx_l))
 
@@ -522,14 +596,14 @@ def _build_trapezoid(
 
     return LaneOutput(
         has_lanes=True,
-        lane_confidence=0.5,
+        lane_confidence=0.55 if mode_str not in ("unmarked_good_vis", "unmarked_degraded") else 0.5,
         left_detected=True,
         right_detected=True,
-        left_confidence=0.5,
-        right_confidence=0.5,
+        left_confidence=0.55 if mode_str not in ("unmarked_good_vis", "unmarked_degraded") else 0.5,
+        right_confidence=0.55 if mode_str not in ("unmarked_good_vis", "unmarked_degraded") else 0.5,
         left_poly=left_poly,
         right_poly=right_poly,
-        edges=None,
+        edges=edges,
         mask=mask,
         roi_y1=y1,
         roi_y2=y2,
@@ -554,6 +628,20 @@ def _fit_line_poly(points: List[Tuple[float, float]]) -> Optional[Tuple[float, f
     return (float(coeffs[0]), float(coeffs[1]))
 
 
+def _fit_lane_poly(points: List[Tuple[float, float]]) -> Optional[Tuple[float, ...]]:
+    """Fit x=f(y), preferring a quadratic model for road curvature."""
+    if len(points) < 4:
+        return None
+    xs = np.array([p[0] for p in points], dtype=np.float32)
+    ys = np.array([p[1] for p in points], dtype=np.float32)
+    if np.std(ys) < 1e-6:
+        return None
+    if len(points) >= 8:
+        coeffs = np.polyfit(ys, xs, 2)
+        return (float(coeffs[0]), float(coeffs[1]), float(coeffs[2]))
+    return _fit_line_poly(points)
+
+
 def _poly_from_two_points(
     y1: float, x1: float, y2: float, x2: float
 ) -> Tuple[float, float]:
@@ -563,6 +651,135 @@ def _poly_from_two_points(
     a = (x2 - x1) / dy
     b = x1 - a * y1
     return (a, b)
+
+
+def _poly_from_three_points(
+    y1: float,
+    x1: float,
+    y2: float,
+    x2: float,
+    y3: float,
+    x3: float,
+) -> Tuple[float, float, float]:
+    ys = np.array([y1, y2, y3], dtype=np.float32)
+    xs = np.array([x1, x2, x3], dtype=np.float32)
+    coeffs = np.polyfit(ys, xs, 2)
+    return (float(coeffs[0]), float(coeffs[1]), float(coeffs[2]))
+
+
+def _poly_eval(poly: Tuple[float, ...], y: float) -> float:
+    if len(poly) == 2:
+        return float(poly[0] * y + poly[1])
+    if len(poly) >= 3:
+        return float(poly[0] * y * y + poly[1] * y + poly[2])
+    return 0.0
+
+
+def _to_quadratic(poly: Tuple[float, ...]) -> Tuple[float, float, float]:
+    if len(poly) == 2:
+        return (0.0, float(poly[0]), float(poly[1]))
+    if len(poly) >= 3:
+        return (float(poly[0]), float(poly[1]), float(poly[2]))
+    return (0.0, 0.0, 0.0)
+
+
+def _expected_lane_x(
+    roi_h: int,
+    w: int,
+    y: float,
+    *,
+    left: bool,
+    cfg: LaneProcessingConfig,
+) -> float:
+    if roi_h <= 1:
+        return w * (cfg.lane_expected_left_bottom_frac if left else cfg.lane_expected_right_bottom_frac)
+    t = max(0.0, min(1.0, y / float(roi_h - 1)))
+    if left:
+        top = w * cfg.lane_expected_left_top_frac
+        bot = w * cfg.lane_expected_left_bottom_frac
+    else:
+        top = w * cfg.lane_expected_right_top_frac
+        bot = w * cfg.lane_expected_right_bottom_frac
+    return top + (bot - top) * t
+
+
+def _estimate_road_geometry(
+    h: int,
+    w: int,
+    y1: int,
+    y2: int,
+    cfg: LaneProcessingConfig,
+    *,
+    edges: Any = None,
+    left_hint: Optional[Tuple[float, ...]] = None,
+    right_hint: Optional[Tuple[float, ...]] = None,
+) -> dict:
+    roi_h = y2 - y1
+    bot_y = max(1, roi_h - 1)
+
+    bx_l = int(w * cfg.trapezoid_bottom_left)
+    bx_r = int(w * cfg.trapezoid_bottom_right)
+    tx_l = int(w * cfg.trapezoid_top_left)
+    tx_r = int(w * cfg.trapezoid_top_right)
+    top_y_roi = max(0, int(h * cfg.trapezoid_top_frac) - y1)
+
+    if edges is not None and hasattr(edges, "shape") and edges.size > 0:
+        row_scores = edges.mean(axis=1)
+        start = max(0, int(roi_h * 0.12))
+        end = max(start + 1, int(roi_h * 0.68))
+        if end > start:
+            local = row_scores[start:end]
+            idx = int(np.argmax(local)) + start
+            low = int(roi_h * 0.22)
+            high = int(roi_h * 0.62)
+            top_y_roi = max(low, min(high, idx))
+
+        band_h = max(8, int(roi_h * 0.12))
+        bot_band = edges[max(0, roi_h - band_h):roi_h, :]
+        top_band = edges[max(0, top_y_roi - band_h // 2):min(roi_h, top_y_roi + band_h // 2 + 1), :]
+
+        bx = np.where(bot_band > 0)[1]
+        tx = np.where(top_band > 0)[1]
+        if bx.size > 50:
+            bx_l = int(np.percentile(bx, 10))
+            bx_r = int(np.percentile(bx, 90))
+        if tx.size > 30:
+            tx_l = int(np.percentile(tx, 35))
+            tx_r = int(np.percentile(tx, 65))
+
+    bx_l = max(0, min(w - 2, bx_l))
+    bx_r = max(bx_l + 1, min(w - 1, bx_r))
+    tx_l = max(0, min(w - 2, tx_l))
+    tx_r = max(tx_l + 1, min(w - 1, tx_r))
+
+    # Keep perspective plausible: top must be narrower than bottom.
+    b_width = float(max(20, bx_r - bx_l))
+    t_width = float(max(10, tx_r - tx_l))
+    max_top = b_width * 0.78
+    min_top = b_width * 0.32
+    if t_width > max_top or t_width < min_top:
+        center = (tx_l + tx_r) * 0.5
+        t_width = max(min_top, min(max_top, t_width))
+        tx_l = int(center - t_width * 0.5)
+        tx_r = int(center + t_width * 0.5)
+
+    tx_l = max(0, min(w - 2, tx_l))
+    tx_r = max(tx_l + 1, min(w - 1, tx_r))
+
+    curve_bias = 0.0
+    if left_hint is not None and right_hint is not None:
+        center_top = (_poly_eval(left_hint, float(top_y_roi)) + _poly_eval(right_hint, float(top_y_roi))) * 0.5
+        center_bot = (_poly_eval(left_hint, float(bot_y)) + _poly_eval(right_hint, float(bot_y))) * 0.5
+        curve_bias = float(np.clip((center_top - center_bot) * 0.25, -w * 0.05, w * 0.05))
+
+    return {
+        "bx_l": bx_l,
+        "bx_r": bx_r,
+        "tx_l": tx_l,
+        "tx_r": tx_r,
+        "top_y_roi": max(0, min(bot_y - 4, top_y_roi)),
+        "curve_bias": curve_bias,
+    }
 
 
 def _build_lane_mask(
@@ -588,8 +805,8 @@ def _build_lane_mask(
     pts_left: List[Tuple[int, int]] = []
     pts_right: List[Tuple[int, int]] = []
     for y in range(roi_h):
-        lx = int(left_poly[0] * y + left_poly[1])
-        rx = int(right_poly[0] * y + right_poly[1])
+        lx = int(_poly_eval(left_poly, float(y)))
+        rx = int(_poly_eval(right_poly, float(y)))
         lx = max(0, min(w - 1, lx))
         rx = max(0, min(w - 1, rx))
         pts_left.append((lx, y))
@@ -619,22 +836,25 @@ def _blend_poly(
     if prev_poly is None:
         return new_poly
 
+    new_q = _to_quadratic(new_poly)
+    prev_q = _to_quadratic(prev_poly)
+
     blended = tuple(
         alpha * n + (1.0 - alpha) * p
-        for n, p in zip(new_poly, prev_poly)
+        for n, p in zip(new_q, prev_q)
     )
 
     if max_shift_px > 0 and roi_h > 0:
         y_bot = float(roi_h - 1)
-        prev_bx = prev_poly[0] * y_bot + prev_poly[1]
-        blended_bx = blended[0] * y_bot + blended[1]
+        prev_bx = _poly_eval(prev_q, y_bot)
+        blended_bx = _poly_eval(blended, y_bot)
         shift = blended_bx - prev_bx
         if abs(shift) > max_shift_px:
             direction = 1.0 if shift > 0 else -1.0
             clamped_bx = prev_bx + max_shift_px * direction
-            a = blended[0]
-            b = clamped_bx - a * y_bot
-            blended = (a, b)
+            a2, a1, _a0 = blended
+            a0 = clamped_bx - (a2 * y_bot * y_bot + a1 * y_bot)
+            blended = (a2, a1, a0)
 
     return blended
 
@@ -649,8 +869,8 @@ def _rebuild_with_polys(
     lane_width_px: Optional[float] = None
     if left_poly is not None and right_poly is not None and roi_h > 0:
         y_bot = float(roi_h - 1)
-        lx = left_poly[0] * y_bot + left_poly[1]
-        rx = right_poly[0] * y_bot + right_poly[1]
+        lx = _poly_eval(left_poly, y_bot)
+        rx = _poly_eval(right_poly, y_bot)
         w_est = abs(rx - lx)
         if w_est > 50:
             lane_width_px = w_est
