@@ -8,13 +8,20 @@ Modules:
   hough.py         - placeholder for future geometric Hough implementation
 """
 
-from .processing import LaneOutput, LaneProcessingConfig, DEFAULT_PROCESSING_CONFIG, process_frame
+from .processing import (
+    LaneOutput,
+    LaneProcessingConfig,
+    DEFAULT_PROCESSING_CONFIG,
+    LaneProcessor,
+    process_frame,
+)
 from .visualization import draw_lanes, draw_edges
 from .metrics import LaneEvalResult, evaluate_detection, evaluate_batch
 
 __all__ = [
     # main API
     "process_frame",
+    "LaneProcessor",
     "draw_lanes",
     "draw_edges",
     "evaluate_detection",

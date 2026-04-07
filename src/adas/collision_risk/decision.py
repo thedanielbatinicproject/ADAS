@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
 from .types import RiskResult, SystemAction
+from ..utils.runtime_overrides import apply_dataclass_overrides
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +52,7 @@ class DecisionConfig:
     only_in_lane: bool = True
 
 
-DEFAULT_DECISION_CONFIG = DecisionConfig()
+DEFAULT_DECISION_CONFIG = apply_dataclass_overrides(DecisionConfig(), "decision")
 
 
 # ---------------------------------------------------------------------------

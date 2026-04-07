@@ -1,30 +1,46 @@
 """Classical CV obstacle detector using background subtraction and contours.
 
-The algorithm:
-  1. Extract the road / forward-view ROI using lane boundaries when available.
-  2. Apply a background subtractor (MOG2) to detect moving objects.
-  3. Apply morphological operations to clean up the foreground mask.
-  4. Find contours and filter by area, aspect ratio, and position.
-  5. Estimate distance from bounding-box height using a simple pinhole model.
+Context-adaptive pipeline
+--------------------------
+The detector adjusts its operating parameters based on the current
+ContextState to improve detection under varying conditions:
 
-This is an intentionally simple classical approach. It works well on the
-DADA-2000 dataset where the dashcam is static and objects move relative to
-the background.
+- Night (light_condition=NIGHT):
+    Lower MOG2 variance threshold (less filtering of slow-moving shadows),
+    larger morphological kernel to merge fragmented blobs.
+
+- Rain (weather_condition=RAIN):
+    Higher learning rate so the background model adapts to streaming water
+    and moving reflections.  Smaller min_area to catch partially occluded
+    vehicles.
+
+- Fog (weather_condition=FOG):
+    Reduced min_area and confidence threshold because low-contrast scenes
+    produce weak foreground responses.
+
+- Degraded mode (DEGRADED_MARKED / UNMARKED_DEGRADED):
+    Combined adaptation: relaxed area filter, higher learning rate.
+
+- Good-visibility unmarked road (UNMARKED_GOOD_VIS):
+    Wider ROI (start higher in frame) because without lane boundaries
+    larger portions of the forward scene are valid detection areas.
+
+- Normal (NORMAL_MARKED, CLEAR, DAY):
+    Default parameters.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, List, Optional
 
 from .types import DetectedObject
+from ..utils.runtime_overrides import apply_dataclass_overrides
 
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-
-from dataclasses import dataclass
-
 
 @dataclass
 class DetectorConfig:
@@ -34,19 +50,16 @@ class DetectorConfig:
     ----------
     roi_top : float
         Top boundary of detection ROI as a fraction of frame height.
-        Should be set to exclude sky and keep roads/intersections.
     roi_bottom : float
         Bottom boundary of detection ROI as a fraction of frame height.
-        Should exclude the dashboard.
     min_area : float
         Minimum contour area in pixels to be considered an obstacle.
     max_area_fraction : float
-        Maximum contour area as a fraction of the ROI area. Larger blobs
-        are likely background artifacts.
+        Maximum contour area as a fraction of the ROI area.
     max_aspect_ratio : float
-        Maximum width/height ratio. Very wide boxes are road markings.
+        Maximum width/height ratio.
     min_aspect_ratio : float
-        Minimum width/height ratio. Very tall thin boxes are posts; allow.
+        Minimum width/height ratio.
     mog2_history : int
         Number of frames for MOG2 background model history.
     mog2_var_threshold : float
@@ -78,24 +91,91 @@ class DetectorConfig:
     assumed_object_height_m: float = 1.5
 
 
-DEFAULT_DETECTOR_CONFIG = DetectorConfig()
+DEFAULT_DETECTOR_CONFIG = apply_dataclass_overrides(DetectorConfig(), "obstacle")
 
 
 # ---------------------------------------------------------------------------
-# Detector class
+# Context-based config selector
+# ---------------------------------------------------------------------------
+
+def _config_for_context(
+    base: DetectorConfig,
+    context_state: Any,
+) -> DetectorConfig:
+    """Return a (possibly modified) config tailored to the current context.
+
+    The returned config is a shallow copy of base with some fields overridden.
+    base itself is never modified.
+    """
+    if context_state is None:
+        return base
+
+    mode_str = _get_attr_str(context_state, "mode")
+    weather_str = _get_attr_str(context_state, "weather_condition")
+    light_str = _get_attr_str(context_state, "light_condition")
+
+    # Start with a copy by re-creating the dataclass with same values.
+    cfg = DetectorConfig(
+        roi_top=base.roi_top,
+        roi_bottom=base.roi_bottom,
+        min_area=base.min_area,
+        max_area_fraction=base.max_area_fraction,
+        max_aspect_ratio=base.max_aspect_ratio,
+        min_aspect_ratio=base.min_aspect_ratio,
+        mog2_history=base.mog2_history,
+        mog2_var_threshold=base.mog2_var_threshold,
+        mog2_learning_rate=base.mog2_learning_rate,
+        morph_kernel_size=base.morph_kernel_size,
+        min_confidence=base.min_confidence,
+        focal_length_px=base.focal_length_px,
+        assumed_object_height_m=base.assumed_object_height_m,
+    )
+
+    if light_str == "night":
+        # Night: more sensitive foreground detection
+        cfg.mog2_var_threshold = max(20.0, base.mog2_var_threshold * 0.6)
+        cfg.morph_kernel_size = base.morph_kernel_size + 2
+        cfg.min_area = max(200.0, base.min_area * 0.7)
+        cfg.min_confidence = max(0.2, base.min_confidence - 0.05)
+
+    if weather_str == "rain":
+        # Rain: faster background adaptation to handle reflections
+        cfg.mog2_learning_rate = min(0.05, base.mog2_learning_rate * 4.0)
+        cfg.min_area = max(250.0, base.min_area * 0.8)
+        cfg.morph_kernel_size = base.morph_kernel_size + 2
+
+    if weather_str == "fog":
+        # Fog: relax confidence and area thresholds
+        cfg.min_area = max(200.0, base.min_area * 0.6)
+        cfg.min_confidence = max(0.18, base.min_confidence - 0.10)
+        cfg.mog2_var_threshold = max(25.0, base.mog2_var_threshold * 0.7)
+
+    if mode_str in ("degraded_marked", "unmarked_degraded"):
+        cfg.mog2_learning_rate = min(0.04, cfg.mog2_learning_rate * 3.0)
+        cfg.min_area = max(200.0, cfg.min_area * 0.75)
+
+    if mode_str in ("unmarked_good_vis", "unmarked_degraded"):
+        # No lane guidance: widen search area upward
+        cfg.roi_top = max(0.20, base.roi_top - 0.10)
+
+    return cfg
+
+
+def _get_attr_str(context_state: Any, attr: str) -> str:
+    val = getattr(context_state, attr, None)
+    if val is None:
+        return ""
+    return str(getattr(val, "value", val)).lower()
+
+
+# ---------------------------------------------------------------------------
+# Detector class (stateful: maintains background model per video)
 # ---------------------------------------------------------------------------
 
 class Detector:
     """Stateful obstacle detector wrapping a MOG2 background subtractor.
 
-    The detector keeps its background model across frames, so it should be
-    created once per video and reused for each frame in sequence.
-
-    Usage
-    -----
-    detector = Detector()
-    for frame in frames:
-        objects = detector.detect(frame, lane_output=lane_out, context_state=ctx)
+    Create one instance per video and call detect() for each frame in order.
     """
 
     def __init__(self, config: Optional[DetectorConfig] = None) -> None:
@@ -121,6 +201,11 @@ class Detector:
         self._frame_idx = 0
         self._init_bg_subtractor()
 
+    def update_config(self, config: DetectorConfig) -> None:
+        """Replace the base config and recreate the background model."""
+        self._config = config
+        self._init_bg_subtractor()
+
     def detect(
         self,
         frame: Any,
@@ -134,24 +219,25 @@ class Detector:
         frame : numpy.ndarray
             BGR uint8 image, shape (H, W, 3).
         lane_output : LaneOutput, optional
-            Lane detection result. Used to restrict the detection ROI to
-            the lane interior when available.
+            Lane detection result.  Used to restrict the ROI to the lane
+            interior when available.
         context_state : ContextState, optional
-            Current system context. Not used in the base implementation
-            but kept for future adaptive tuning.
+            Current system context.  Used to adapt detection parameters.
 
         Returns
         -------
         list[DetectedObject]
-            Detected obstacles in full-frame pixel coordinates.
         """
+        # Derive a per-frame config based on context
+        effective_cfg = _config_for_context(self._config, context_state)
+
         result = detect_obstacles(
             frame,
             lane_output=lane_output,
             context_state=context_state,
             bg_subtractor=self._bg_subtractor,
             frame_idx=self._frame_idx,
-            config=self._config,
+            config=effective_cfg,
         )
         self._frame_idx += 1
         return result
@@ -181,24 +267,24 @@ def detect_obstacles(
     lane_output : LaneOutput, optional
         Used to restrict the search to the lane ROI.
     context_state : ContextState, optional
-        Not used currently; reserved for future adaptive behavior.
+        Used to adapt the effective config if no explicit config is given.
     bg_subtractor : cv2.BackgroundSubtractor, optional
         Pre-created background subtractor with existing history.
     frame_idx : int
         Frame index for annotating results.
     config : DetectorConfig, optional
-        Tunable parameters.
-
-    Returns
-    -------
-    list[DetectedObject]
+        Tunable parameters.  When None and context_state is provided,
+        an adapted config derived from DEFAULT_DETECTOR_CONFIG is used.
     """
     try:
         import cv2
     except ImportError:
         return []
 
-    cfg = config or DEFAULT_DETECTOR_CONFIG
+    if config is None:
+        config = _config_for_context(DEFAULT_DETECTOR_CONFIG, context_state)
+
+    cfg = config
 
     if frame is None or not hasattr(frame, "shape") or frame.size == 0:
         return []
@@ -212,7 +298,6 @@ def detect_obstacles(
     roi = frame[y1:y2, :]
     roi_area = (y2 - y1) * w
 
-    # Background subtraction
     if bg_subtractor is None:
         bg_subtractor = cv2.createBackgroundSubtractorMOG2(
             history=cfg.mog2_history,
@@ -220,21 +305,18 @@ def detect_obstacles(
             detectShadows=True,
         )
 
-    cfg_lr = cfg.mog2_learning_rate
-    fg_mask = bg_subtractor.apply(roi, learningRate=cfg_lr)
+    fg_mask = bg_subtractor.apply(roi, learningRate=cfg.mog2_learning_rate)
 
-    # Threshold: remove shadows (127) and keep foreground (255)
     _, fg_mask = cv2.threshold(fg_mask, 200, 255, cv2.THRESH_BINARY)
 
-    # Morphological cleanup
     kernel_size = max(1, cfg.morph_kernel_size)
-    kernel = cv2.getStructuringElement(
-        cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)
-    )
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
     fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel, iterations=1)
     fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_DILATE, kernel, iterations=2)
 
-    contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(
+        fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
     if not contours:
         return []
 
@@ -254,13 +336,11 @@ def detect_obstacles(
         if aspect > cfg.max_aspect_ratio or aspect < cfg.min_aspect_ratio:
             continue
 
-        # Convert to full-frame coordinates
         full_bx = bx
         full_by = by + y1
         cx = float(full_bx + bw / 2)
         cy = float(full_by + bh / 2)
 
-        # Simple confidence: larger, more compact contours score higher
         fill_ratio = area / float(bw * bh) if (bw * bh) > 0 else 0.0
         norm_area = min(1.0, area / max(1.0, max_area))
         confidence = 0.5 * fill_ratio + 0.5 * norm_area
@@ -269,7 +349,6 @@ def detect_obstacles(
         if confidence < cfg.min_confidence:
             continue
 
-        # Distance heuristic: object_height_px -> distance via pinhole model
         distance_est: Optional[float] = None
         if bh > 0:
             distance_est = (cfg.focal_length_px * cfg.assumed_object_height_m) / float(bh)

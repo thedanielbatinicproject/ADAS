@@ -37,7 +37,8 @@ def run_scenario(config: ScenarioConfig, *, log_file: Optional[str] = None) -> N
 
     from adas.dataset import parser  # noqa: F811
     from adas.context.defaults import DEFAULT_CONFIG
-    from adas.lane_detection import process_frame
+    from adas.context.service import ContextService
+    from adas.lane_detection import LaneProcessor
     from adas.obstacle_detection.detector import Detector
     from adas.obstacle_detection.tracking import SimpleTracker
     from adas.collision_risk.estimator import RiskEstimator
@@ -104,7 +105,18 @@ def run_scenario(config: ScenarioConfig, *, log_file: Optional[str] = None) -> N
 
     # ---- Pipeline components ----
     ctx_config = DEFAULT_CONFIG
-    prev_ctx_state: Any = None
+
+    # Context analysis runs in a dedicated background thread.
+    # The main loop pushes each frame that is a multiple of context_interval;
+    # the service analyses it asynchronously and caches the result.
+    ctx_service = ContextService(
+        config=ctx_config,
+        context_interval=config.context_interval,
+    )
+    ctx_service.start()
+
+    # LaneProcessor keeps temporal state for polynomial damping.
+    lane_processor = LaneProcessor()
     detector = Detector()
     tracker = SimpleTracker()
     risk_estimator = RiskEstimator()
@@ -148,6 +160,7 @@ def run_scenario(config: ScenarioConfig, *, log_file: Optional[str] = None) -> N
 
     cursor = 0
     last_cursor = n_frames - 1
+    _ctx_service_stopped = False
 
     while 0 <= cursor <= last_cursor:
         if config.max_frames is not None and frame_count >= config.max_frames:
@@ -165,35 +178,32 @@ def run_scenario(config: ScenarioConfig, *, log_file: Optional[str] = None) -> N
 
         timestamp_s = frame_idx / max(1.0, config.target_fps)
 
-        # ---- Context (every N frames or first frame) ----
-        if frame_idx % config.context_interval == 0 or prev_ctx_state is None:
-            from adas.context import route
-            from adas.context.lane_heuristic import detect_lanes_heuristic
-            lane_input = detect_lanes_heuristic(frame, config=ctx_config)
-            prev_ctx_state = route(
-                frame,
-                lane_detection=lane_input,
-                timestamp_s=timestamp_s,
-                fps=config.target_fps,
-                emergency=None,
-                prev_state=prev_ctx_state,
-                config=ctx_config,
-            )
+        # ---- Context (background thread, non-blocking) ----
+        # Push this frame to the context service.  It will be analysed
+        # asynchronously; frames not at context_interval multiples are
+        # dropped immediately by the service.
+        ctx_service.push_frame(
+            frame,
+            frame_idx,
+            timestamp_s=timestamp_s,
+            fps=config.target_fps,
+        )
+        # Read the latest cached state (non-blocking; may be None on first frame).
+        ctx_state = ctx_service.get_state()
 
-        ctx_state = prev_ctx_state
-
-        # Log mode changes
-        if prev_mode is not None and ctx_state.mode != prev_mode:
+        # Log mode changes (only when ctx_state is available)
+        if ctx_state is not None and prev_mode is not None and ctx_state.mode != prev_mode:
             log_event(ScenarioEvent(
                 event_type=EventType.MODE_CHANGE,
                 frame_idx=frame_idx,
                 timestamp_s=timestamp_s,
                 details={"from": prev_mode.value, "to": ctx_state.mode.value},
             ), log_file=log_file)
-        prev_mode = ctx_state.mode
+        if ctx_state is not None:
+            prev_mode = ctx_state.mode
 
-        # ---- Lane detection ----
-        lane_output = process_frame(frame, ctx_state)
+        # ---- Lane detection (stateful, with temporal damping) ----
+        lane_output = lane_processor.update(frame, ctx_state)
 
         # ---- Obstacle detection + tracking ----
         raw_detections = detector.detect(frame, lane_output=lane_output, context_state=ctx_state)
@@ -338,6 +348,8 @@ def run_scenario(config: ScenarioConfig, *, log_file: Optional[str] = None) -> N
         frame_count += 1
 
     # ---- Cleanup ----
+    ctx_service.stop()
+    lane_processor.reset()
     if player is not None:
         player.close()
 

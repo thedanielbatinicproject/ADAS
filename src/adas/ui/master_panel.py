@@ -203,6 +203,10 @@ class MasterDashboard:
                     self._build_analyze_context_card()
                 with dpg.tab(label="Tests"):
                     self._build_pytest_card()
+                with dpg.tab(label="Context analysis"):
+                    self._build_context_analysis_tab()
+                with dpg.tab(label="Parameters"):
+                    self._build_parameters_tab()
 
     def _build_run_simulation_card(self) -> None:
         with dpg.child_window(height=265, border=True, tag="card_run_scenario"):
@@ -319,6 +323,271 @@ class MasterDashboard:
                 dpg.add_checkbox(label="-vv", default_value=False, tag="pytest_vv")
             dpg.add_input_text(label="extra args", default_value="", width=-1, tag="pytest_extra")
             dpg.add_button(label="RUN pytest", width=-1, height=40, callback=self._run_pytest_cmd)
+
+    def _build_context_analysis_tab(self) -> None:
+        """Tab for configuring the background context-analysis thread."""
+        with dpg.child_window(height=300, border=True):
+            dpg.add_text("Context Analysis Thread", color=(160, 220, 255))
+            dpg.add_text(
+                "These settings control how often the secondary context-analysis\n"
+                "thread runs during scenario playback.",
+                color=(170, 170, 170),
+                wrap=400,
+            )
+            dpg.add_separator()
+
+            with dpg.group(horizontal=True):
+                dpg.add_text("context_interval (frames):", color=(200, 200, 200))
+                dpg.add_input_text(
+                    tag="ctx_interval",
+                    default_value="5",
+                    width=80,
+                    hint="5",
+                )
+
+            dpg.add_spacer(height=4)
+            dpg.add_text(
+                "A lower value means more frequent context updates (more\n"
+                "accurate mode/weather detection) but higher CPU usage.\n"
+                "Recommended: 3-10 frames.",
+                color=(150, 150, 150),
+                wrap=400,
+            )
+            dpg.add_separator()
+            dpg.add_text("Context analysis in run_scenario.py uses the interval above.", color=(170, 170, 170), wrap=400)
+            dpg.add_text("The interval is passed as --context-interval to the script.", color=(170, 170, 170), wrap=400)
+
+    def _build_parameters_tab(self) -> None:
+        """Tab for overriding default algorithm parameters."""
+        with dpg.child_window(height=-1, border=False):
+            dpg.add_text("Algorithm Parameter Overrides", color=(255, 220, 100))
+            dpg.add_text(
+                "Enter new values and click Save to replace the defaults.\n"
+                "Changes take effect on the next run.",
+                color=(170, 170, 170),
+                wrap=400,
+            )
+            dpg.add_separator()
+
+            # --- Lane Detection ---
+            with dpg.collapsing_header(label="Lane Detection (LaneProcessingConfig)", default_open=True):
+                self._param_row("lane_roi_top", "roi_top", "0.38", "Fraction of frame height for ROI top")
+                self._param_row("lane_roi_bottom", "roi_bottom", "0.90", "Fraction of frame height for ROI bottom")
+                self._param_row("lane_canny_low", "canny_low", "40", "Canny lower threshold")
+                self._param_row("lane_canny_high", "canny_high", "120", "Canny upper threshold")
+                self._param_row("lane_clahe_clip", "clahe_clip", "1.8", "CLAHE clip limit")
+                self._param_row("lane_hough_threshold", "hough_threshold", "35", "HoughLinesP accumulator threshold")
+                self._param_row("lane_hough_min_length", "hough_min_length", "30", "HoughLinesP min line length")
+                self._param_row("lane_hough_max_gap", "hough_max_gap", "130", "HoughLinesP max line gap")
+                self._param_row("lane_damping_alpha", "damping_alpha", "0.65", "Temporal damping blend (0=no update, 1=raw)")
+                self._param_row("lane_max_shift_px", "max_shift_px", "80.0", "Max poly shift per frame (px)")
+                with dpg.group(horizontal=True):
+                    dpg.add_button(label="Save Lane Detection", callback=self._save_lane_params)
+                    dpg.add_button(label="Reset to defaults", callback=self._reset_lane_params)
+
+            dpg.add_spacer(height=6)
+
+            # --- Obstacle Detection ---
+            with dpg.collapsing_header(label="Obstacle Detection (DetectorConfig)", default_open=True):
+                self._param_row("obs_roi_top", "roi_top", "0.30", "Detection ROI top fraction")
+                self._param_row("obs_roi_bottom", "roi_bottom", "0.90", "Detection ROI bottom fraction")
+                self._param_row("obs_min_area", "min_area", "400.0", "Min contour area (px)")
+                self._param_row("obs_mog2_var_threshold", "mog2_var_threshold", "50.0", "MOG2 variance threshold")
+                self._param_row("obs_mog2_learning_rate", "mog2_learning_rate", "0.005", "MOG2 learning rate")
+                self._param_row("obs_morph_kernel_size", "morph_kernel_size", "5", "Morphological kernel size")
+                self._param_row("obs_min_confidence", "min_confidence", "0.3", "Min detection confidence")
+                self._param_row("obs_focal_length_px", "focal_length_px", "700.0", "Focal length (px) for distance est.")
+                with dpg.group(horizontal=True):
+                    dpg.add_button(label="Save Obstacle Detection", callback=self._save_obstacle_params)
+                    dpg.add_button(label="Reset to defaults", callback=self._reset_obstacle_params)
+
+            dpg.add_spacer(height=6)
+
+            # --- Collision Risk Estimator ---
+            with dpg.collapsing_header(label="Collision Risk (EstimatorConfig)", default_open=True):
+                self._param_row("risk_ttc_warning_s", "ttc_warning_s", "3.0", "TTC warning threshold (s)")
+                self._param_row("risk_ttc_brake_s", "ttc_brake_s", "1.5", "TTC brake threshold (s)")
+                self._param_row("risk_max_ttc_s", "max_ttc_s", "10.0", "Max TTC (s)")
+                self._param_row("risk_max_distance_m", "max_distance_m", "40.0", "Max distance for risk (m)")
+                self._param_row("risk_proximity_weight", "proximity_weight", "0.35", "Proximity weight in risk score")
+                self._param_row("risk_ttc_weight", "ttc_weight", "0.50", "TTC weight in risk score")
+                self._param_row("risk_lateral_weight", "lateral_weight", "0.15", "Lateral weight in risk score")
+                with dpg.group(horizontal=True):
+                    dpg.add_button(label="Save Risk Estimator", callback=self._save_risk_params)
+                    dpg.add_button(label="Reset to defaults", callback=self._reset_risk_estimator_params)
+
+            dpg.add_spacer(height=6)
+
+            # --- Decision ---
+            with dpg.collapsing_header(label="Collision Risk (DecisionConfig)", default_open=True):
+                self._param_row("dec_warn_score_threshold", "warn_score_threshold", "0.35", "WARN score threshold")
+                self._param_row("dec_brake_score_threshold", "brake_score_threshold", "0.65", "BRAKE score threshold")
+                self._param_row("dec_ttc_warn_s", "ttc_warn_s", "3.0", "TTC WARN threshold (s)")
+                self._param_row("dec_ttc_brake_s", "ttc_brake_s", "1.5", "TTC BRAKE threshold (s)")
+                with dpg.group(horizontal=True):
+                    dpg.add_button(label="Save Decision Config", callback=self._save_decision_params)
+                    dpg.add_button(label="Reset to defaults", callback=self._reset_decision_params)
+
+    def _param_row(self, tag: str, label: str, default: str, hint: str = "") -> None:
+        """Helper: one labelled input row in the parameters tab."""
+        with dpg.group(horizontal=True):
+            dpg.add_text(f"{label}:", color=(200, 200, 200))
+            dpg.add_input_text(tag=tag, default_value=default, width=120, hint=hint)
+
+    # ---- Parameter save callbacks ----
+
+    def _save_lane_params(self) -> None:
+        try:
+            from adas.lane_detection.processing import DEFAULT_PROCESSING_CONFIG
+            import adas.lane_detection.processing as _lmod
+            kw = {
+                "roi_top": float(dpg.get_value("lane_roi_top")),
+                "roi_bottom": float(dpg.get_value("lane_roi_bottom")),
+                "canny_low": int(float(dpg.get_value("lane_canny_low"))),
+                "canny_high": int(float(dpg.get_value("lane_canny_high"))),
+                "clahe_clip": float(dpg.get_value("lane_clahe_clip")),
+                "hough_threshold": int(float(dpg.get_value("lane_hough_threshold"))),
+                "hough_min_length": int(float(dpg.get_value("lane_hough_min_length"))),
+                "hough_max_gap": int(float(dpg.get_value("lane_hough_max_gap"))),
+                "damping_alpha": float(dpg.get_value("lane_damping_alpha")),
+                "max_shift_px": float(dpg.get_value("lane_max_shift_px")),
+            }
+            # Build a new config that copies remaining defaults
+            import dataclasses
+            new_cfg = dataclasses.replace(DEFAULT_PROCESSING_CONFIG, **kw)
+            _lmod.DEFAULT_PROCESSING_CONFIG = new_cfg
+            self._startup_log("Lane detection defaults saved.", (100, 220, 100))
+        except Exception as exc:
+            self._startup_log(f"Lane param save error: {exc}", (255, 130, 130))
+
+    def _reset_lane_params(self) -> None:
+        defaults = {
+            "lane_roi_top": "0.38", "lane_roi_bottom": "0.90",
+            "lane_canny_low": "40", "lane_canny_high": "120",
+            "lane_clahe_clip": "1.8", "lane_hough_threshold": "35",
+            "lane_hough_min_length": "30", "lane_hough_max_gap": "130",
+            "lane_damping_alpha": "0.65", "lane_max_shift_px": "80.0",
+        }
+        for tag, val in defaults.items():
+            if dpg.does_item_exist(tag):
+                dpg.set_value(tag, val)
+        try:
+            import adas.lane_detection.processing as _lmod
+            from adas.lane_detection.processing import LaneProcessingConfig
+            _lmod.DEFAULT_PROCESSING_CONFIG = LaneProcessingConfig()
+            self._startup_log("Lane detection defaults reset.", (200, 200, 200))
+        except Exception as exc:
+            self._startup_log(f"Lane reset error: {exc}", (255, 130, 130))
+
+    def _save_obstacle_params(self) -> None:
+        try:
+            from adas.obstacle_detection.detector import DEFAULT_DETECTOR_CONFIG
+            import adas.obstacle_detection.detector as _dmod
+            import dataclasses
+            kw = {
+                "roi_top": float(dpg.get_value("obs_roi_top")),
+                "roi_bottom": float(dpg.get_value("obs_roi_bottom")),
+                "min_area": float(dpg.get_value("obs_min_area")),
+                "mog2_var_threshold": float(dpg.get_value("obs_mog2_var_threshold")),
+                "mog2_learning_rate": float(dpg.get_value("obs_mog2_learning_rate")),
+                "morph_kernel_size": int(float(dpg.get_value("obs_morph_kernel_size"))),
+                "min_confidence": float(dpg.get_value("obs_min_confidence")),
+                "focal_length_px": float(dpg.get_value("obs_focal_length_px")),
+            }
+            new_cfg = dataclasses.replace(DEFAULT_DETECTOR_CONFIG, **kw)
+            _dmod.DEFAULT_DETECTOR_CONFIG = new_cfg
+            self._startup_log("Obstacle detection defaults saved.", (100, 220, 100))
+        except Exception as exc:
+            self._startup_log(f"Obstacle param save error: {exc}", (255, 130, 130))
+
+    def _reset_obstacle_params(self) -> None:
+        defaults = {
+            "obs_roi_top": "0.30", "obs_roi_bottom": "0.90",
+            "obs_min_area": "400.0", "obs_mog2_var_threshold": "50.0",
+            "obs_mog2_learning_rate": "0.005", "obs_morph_kernel_size": "5",
+            "obs_min_confidence": "0.3", "obs_focal_length_px": "700.0",
+        }
+        for tag, val in defaults.items():
+            if dpg.does_item_exist(tag):
+                dpg.set_value(tag, val)
+        try:
+            import adas.obstacle_detection.detector as _dmod
+            from adas.obstacle_detection.detector import DetectorConfig
+            _dmod.DEFAULT_DETECTOR_CONFIG = DetectorConfig()
+            self._startup_log("Obstacle detection defaults reset.", (200, 200, 200))
+        except Exception as exc:
+            self._startup_log(f"Obstacle reset error: {exc}", (255, 130, 130))
+
+    def _save_risk_params(self) -> None:
+        try:
+            from adas.collision_risk.estimator import DEFAULT_ESTIMATOR_CONFIG
+            import adas.collision_risk.estimator as _emod
+            import dataclasses
+            kw = {
+                "ttc_warning_s": float(dpg.get_value("risk_ttc_warning_s")),
+                "ttc_brake_s": float(dpg.get_value("risk_ttc_brake_s")),
+                "max_ttc_s": float(dpg.get_value("risk_max_ttc_s")),
+                "max_distance_m": float(dpg.get_value("risk_max_distance_m")),
+                "proximity_weight": float(dpg.get_value("risk_proximity_weight")),
+                "ttc_weight": float(dpg.get_value("risk_ttc_weight")),
+                "lateral_weight": float(dpg.get_value("risk_lateral_weight")),
+            }
+            new_cfg = dataclasses.replace(DEFAULT_ESTIMATOR_CONFIG, **kw)
+            _emod.DEFAULT_ESTIMATOR_CONFIG = new_cfg
+            self._startup_log("Risk estimator defaults saved.", (100, 220, 100))
+        except Exception as exc:
+            self._startup_log(f"Risk param save error: {exc}", (255, 130, 130))
+
+    def _reset_risk_estimator_params(self) -> None:
+        defaults = {
+            "risk_ttc_warning_s": "3.0", "risk_ttc_brake_s": "1.5",
+            "risk_max_ttc_s": "10.0", "risk_max_distance_m": "40.0",
+            "risk_proximity_weight": "0.35", "risk_ttc_weight": "0.50",
+            "risk_lateral_weight": "0.15",
+        }
+        for tag, val in defaults.items():
+            if dpg.does_item_exist(tag):
+                dpg.set_value(tag, val)
+        try:
+            import adas.collision_risk.estimator as _emod
+            from adas.collision_risk.estimator import EstimatorConfig
+            _emod.DEFAULT_ESTIMATOR_CONFIG = EstimatorConfig()
+            self._startup_log("Risk estimator defaults reset.", (200, 200, 200))
+        except Exception as exc:
+            self._startup_log(f"Risk reset error: {exc}", (255, 130, 130))
+
+    def _save_decision_params(self) -> None:
+        try:
+            from adas.collision_risk.decision import DEFAULT_DECISION_CONFIG
+            import adas.collision_risk.decision as _decmod
+            import dataclasses
+            kw = {
+                "warn_score_threshold": float(dpg.get_value("dec_warn_score_threshold")),
+                "brake_score_threshold": float(dpg.get_value("dec_brake_score_threshold")),
+                "ttc_warn_s": float(dpg.get_value("dec_ttc_warn_s")),
+                "ttc_brake_s": float(dpg.get_value("dec_ttc_brake_s")),
+            }
+            new_cfg = dataclasses.replace(DEFAULT_DECISION_CONFIG, **kw)
+            _decmod.DEFAULT_DECISION_CONFIG = new_cfg
+            self._startup_log("Decision config defaults saved.", (100, 220, 100))
+        except Exception as exc:
+            self._startup_log(f"Decision param save error: {exc}", (255, 130, 130))
+
+    def _reset_decision_params(self) -> None:
+        defaults = {
+            "dec_warn_score_threshold": "0.35", "dec_brake_score_threshold": "0.65",
+            "dec_ttc_warn_s": "3.0", "dec_ttc_brake_s": "1.5",
+        }
+        for tag, val in defaults.items():
+            if dpg.does_item_exist(tag):
+                dpg.set_value(tag, val)
+        try:
+            import adas.collision_risk.decision as _decmod
+            from adas.collision_risk.decision import DecisionConfig
+            _decmod.DEFAULT_DECISION_CONFIG = DecisionConfig()
+            self._startup_log("Decision config defaults reset.", (200, 200, 200))
+        except Exception as exc:
+            self._startup_log(f"Decision reset error: {exc}", (255, 130, 130))
 
     def _build_process_overlay(self) -> None:
         with dpg.window(
@@ -939,6 +1208,8 @@ class MasterDashboard:
             dpg.get_value("run_scenario_ui"),
             "--target-fps",
             dpg.get_value("run_scenario_fps").strip() or "30",
+            "--context-interval",
+            dpg.get_value("ctx_interval").strip() or "5",
         ])
         max_frames = dpg.get_value("run_scenario_max_frames").strip()
         if max_frames:

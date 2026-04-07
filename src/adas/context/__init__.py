@@ -31,6 +31,7 @@ from .types import (
 )
 from .defaults import ContextConfig, DEFAULT_CONFIG
 from .router import route
+from .service import ContextService
 from .scene_metrics import compute_scene_metrics, estimate_visibility
 from .lane_state import compute_lane_state
 from .road_surface import estimate_road_surface, braking_multiplier
@@ -38,6 +39,7 @@ from .road_surface import estimate_road_surface, braking_multiplier
 __all__ = [
     # main entry point
     "route",
+    "ContextService",
     # scene metrics
     "compute_scene_metrics",
     "estimate_visibility",

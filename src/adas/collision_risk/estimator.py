@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .types import RiskResult
 from ..obstacle_detection.types import DetectedObject
+from ..utils.runtime_overrides import apply_dataclass_overrides
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +77,7 @@ class EstimatorConfig:
     velocity_buffer_size: int = 8
 
 
-DEFAULT_ESTIMATOR_CONFIG = EstimatorConfig()
+DEFAULT_ESTIMATOR_CONFIG = apply_dataclass_overrides(EstimatorConfig(), "estimator")
 
 
 # ---------------------------------------------------------------------------
