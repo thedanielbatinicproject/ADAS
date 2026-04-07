@@ -75,14 +75,8 @@ def draw_lanes(
         and lane_output.right_poly is not None
         and fill_alpha > 0
     ):
-        lxs = np.clip(
-            (lane_output.left_poly[0] * ys + lane_output.left_poly[1]).astype(np.int32),
-            0, w - 1,
-        )
-        rxs = np.clip(
-            (lane_output.right_poly[0] * ys + lane_output.right_poly[1]).astype(np.int32),
-            0, w - 1,
-        )
+        lxs = np.clip(_eval_poly(lane_output.left_poly, ys).astype(np.int32), 0, w - 1)
+        rxs = np.clip(_eval_poly(lane_output.right_poly, ys).astype(np.int32), 0, w - 1)
         ys_int = (ys + y1).astype(np.int32)
         left_pts = list(zip(lxs.tolist(), ys_int.tolist()))
         right_pts = list(reversed(list(zip(rxs.tolist(), ys_int.tolist()))))
@@ -159,10 +153,17 @@ def _draw_poly_line(
     thickness: int,
     cv2: Any,
 ) -> None:
-    """Draw a polynomial curve x = a*y + b as a polyline on frame in-place."""
-    xs = np.clip(
-        (poly[0] * ys + poly[1]).astype(np.int32), 0, frame_w - 1
-    )
+    """Draw a lane boundary polyline for linear or quadratic x=f(y)."""
+    xs = np.clip(_eval_poly(poly, ys).astype(np.int32), 0, frame_w - 1)
     ys_abs = (ys + y_offset).astype(np.int32)
     pts = np.stack([xs, ys_abs], axis=1).reshape((-1, 1, 2))
     cv2.polylines(frame, [pts], isClosed=False, color=color, thickness=thickness, lineType=cv2.LINE_AA)
+
+
+def _eval_poly(poly: tuple, ys: Any) -> Any:
+    """Evaluate x=f(y) for linear (a,b) or quadratic (a2,a1,a0) polynomials."""
+    if len(poly) >= 3:
+        return poly[0] * ys * ys + poly[1] * ys + poly[2]
+    if len(poly) == 2:
+        return poly[0] * ys + poly[1]
+    return np.zeros_like(ys)

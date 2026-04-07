@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import os
 import queue
 import re
@@ -16,6 +17,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import dearpygui.dearpygui as dpg
+
+from adas.utils.runtime_overrides import get_runtime_overrides_path
 
 
 @dataclass
@@ -53,6 +56,7 @@ class MasterDashboard:
         self.selected_row: Optional[Dict[str, Any]] = None
         self.selected_row_id: Optional[str] = None
         self.process = ProcessState()
+        self.actions_panel_width = 520
 
         self._table_tags: List[str] = []
         self._row_highlight_theme: Optional[int] = None
@@ -64,16 +68,27 @@ class MasterDashboard:
         self.startup_log_lines: List[Tuple[str, Tuple[int, int, int]]] = []
         self._startup_queue: queue.Queue[Tuple[str, Tuple[int, int, int]]] = queue.Queue()
         self._docker_setup_running = False
+        self._telemetry_queue: queue.Queue[Dict[str, Any]] = queue.Queue()
+        self._telemetry_stop = threading.Event()
+        self._telemetry_thread: Optional[threading.Thread] = None
+        self._latest_telemetry: Dict[str, Any] = {}
+        self._prev_cpu_snapshot: Optional[Dict[str, Tuple[int, int]]] = None
+        self._param_history: Dict[str, List[str]] = {}
+        self._param_tags: List[str] = []
+        self._param_undo_suppress = False
         self._hidden_columns: set = {
             "maps_path", "type", "abnormal_start_frame", "total_frames",
             "interval_0_tai", "interval_tai_tco", "interval_tai_tae",
             "interval_tco_tae", "interval_tae_end",
         }
+        self.runtime_overrides_path = get_runtime_overrides_path(self.project_root)
+        self._runtime_overrides = self._load_runtime_overrides()
 
     def run(self) -> None:
         dpg.create_context()
         self._build_theme()
         self._build_ui()
+        self._apply_runtime_overrides_to_inputs()
         dpg.create_viewport(title="ADAS Control Panel", width=1680, height=980, x_pos=120, y_pos=60, decorated=True)
         dpg.setup_dearpygui()
         dpg.show_viewport()
@@ -81,13 +96,16 @@ class MasterDashboard:
         dpg.set_viewport_resize_callback(self._on_viewport_resize)
         self._on_viewport_resize()
         self._reload_table_data(show_message=True)
+        self._start_telemetry_thread()
 
         while dpg.is_dearpygui_running():
             self._drain_startup_output()
             self._drain_process_output()
+            self._drain_telemetry_output()
             self._poll_process_end()
             dpg.render_dearpygui_frame()
 
+        self._stop_telemetry_thread()
         self._cancel_active_process()
         dpg.destroy_context()
 
@@ -127,10 +145,15 @@ class MasterDashboard:
 
         self._build_process_overlay()
         self._build_startup_overlay()
+        self._build_log_window()
+        self._build_keyboard_handlers()
 
     def _build_table_card(self) -> None:
         with dpg.child_window(width=-1, height=-1, border=True, tag="table_card"):
-            dpg.add_text("Video Index Table", color=(255, 100, 100))
+            with dpg.group(horizontal=True):
+                dpg.add_text("Video Index Table", color=(255, 100, 100))
+                dpg.add_spacer(width=14)
+                dpg.add_button(label="VIEW LOG", callback=self._open_log_window, width=120, height=24)
             dpg.add_separator()
             with dpg.group(horizontal=True):
                 dpg.add_text("Index path:", color=(170, 170, 170))
@@ -185,28 +208,45 @@ class MasterDashboard:
             dpg.bind_item_theme("table_card", self._table_card_theme)
 
     def _build_actions_panel(self) -> None:
-        with dpg.child_window(width=440, height=-1, border=True, tag="actions_panel"):
+        with dpg.child_window(
+            width=self.actions_panel_width,
+            height=-1,
+            border=True,
+            tag="actions_panel",
+            no_scrollbar=True,
+            no_scroll_with_mouse=True,
+        ):
             dpg.add_text("Selected Video", color=(200, 220, 255))
             dpg.add_text("None", tag="selected_video_label", color=(255, 255, 255))
             dpg.add_separator()
 
-            with dpg.tab_bar():
-                with dpg.tab(label="Simulation"):
-                    self._build_run_simulation_card()
-                    self._build_play_video_card()
-                with dpg.tab(label="Dataset"):
-                    self._build_build_index_card()
-                    self._build_sample_conditions_card()
-                with dpg.tab(label="Debug"):
-                    self._build_debug_lanes_card()
-                    self._build_debug_obstacles_card()
-                    self._build_analyze_context_card()
-                with dpg.tab(label="Tests"):
-                    self._build_pytest_card()
-                with dpg.tab(label="Context analysis"):
-                    self._build_context_analysis_tab()
-                with dpg.tab(label="Parameters"):
-                    self._build_parameters_tab()
+            with dpg.child_window(
+                height=-1,
+                border=False,
+                tag="actions_tabs_container",
+                no_scrollbar=True,
+                no_scroll_with_mouse=True,
+            ):
+                with dpg.tab_bar():
+                    with dpg.tab(label="Simulation"):
+                        self._build_run_simulation_card()
+                        self._build_play_video_card()
+                    with dpg.tab(label="Dataset"):
+                        self._build_build_index_card()
+                        self._build_sample_conditions_card()
+                    with dpg.tab(label="Debug"):
+                        self._build_debug_lanes_card()
+                        self._build_debug_obstacles_card()
+                        self._build_analyze_context_card()
+                    with dpg.tab(label="Tests"):
+                        self._build_pytest_card()
+                    with dpg.tab(label="Context analysis"):
+                        self._build_context_analysis_tab()
+                    with dpg.tab(label="Parameters"):
+                        self._build_parameters_tab()
+
+            dpg.add_spacer(height=6)
+            self._build_runtime_metrics_card()
 
     def _build_run_simulation_card(self) -> None:
         with dpg.child_window(height=265, border=True, tag="card_run_scenario"):
@@ -316,13 +356,37 @@ class MasterDashboard:
     def _build_pytest_card(self) -> None:
         with dpg.child_window(height=210, border=True):
             dpg.add_text("Run Tests (pytest in Docker)", color=(230, 200, 120))
-            dpg.add_input_text(label="targets", default_value="tests", width=-1, tag="pytest_targets")
+            with dpg.group(horizontal=True):
+                dpg.add_text("targets", color=(180, 180, 180))
+                dpg.add_input_text(default_value="tests", width=255, tag="pytest_targets")
             with dpg.group(horizontal=True):
                 dpg.add_checkbox(label="-q", default_value=True, tag="pytest_q")
                 dpg.add_checkbox(label="-x", default_value=False, tag="pytest_x")
                 dpg.add_checkbox(label="-vv", default_value=False, tag="pytest_vv")
-            dpg.add_input_text(label="extra args", default_value="", width=-1, tag="pytest_extra")
+            with dpg.group(horizontal=True):
+                dpg.add_text("extra args", color=(180, 180, 180))
+                dpg.add_input_text(default_value="", width=255, tag="pytest_extra")
             dpg.add_button(label="RUN pytest", width=-1, height=40, callback=self._run_pytest_cmd)
+
+    def _build_runtime_metrics_card(self) -> None:
+        with dpg.child_window(
+            height=245,
+            border=True,
+            tag="runtime_metrics_card",
+            no_scrollbar=True,
+            no_scroll_with_mouse=True,
+        ):
+            dpg.add_text("Docker Runtime Monitor", color=(145, 230, 180))
+            dpg.add_text("Refresh: 0.5s", color=(150, 150, 150))
+            dpg.add_separator()
+            dpg.add_text("Core CPU usage", color=(220, 220, 220))
+            for i in range(4):
+                dpg.add_text(f"core{i}: n/a", tag=f"docker_core_{i}", color=(180, 180, 180))
+            dpg.add_separator()
+            dpg.add_text("RAM: n/a", tag="docker_mem", color=(180, 180, 180))
+            dpg.add_text("Load avg: n/a", tag="docker_load", color=(180, 180, 180))
+            dpg.add_text("Processes: n/a", tag="docker_procs", color=(180, 180, 180))
+            dpg.add_text("Container: unknown", tag="docker_status", color=(180, 180, 180))
 
     def _build_context_analysis_tab(self) -> None:
         """Tab for configuring the background context-analysis thread."""
@@ -359,7 +423,7 @@ class MasterDashboard:
 
     def _build_parameters_tab(self) -> None:
         """Tab for overriding default algorithm parameters."""
-        with dpg.child_window(height=-1, border=False):
+        with dpg.child_window(height=-1, border=False, no_scrollbar=True, no_scroll_with_mouse=True):
             dpg.add_text("Algorithm Parameter Overrides", color=(255, 220, 100))
             dpg.add_text(
                 "Enter new values and click Save to replace the defaults.\n"
@@ -430,15 +494,68 @@ class MasterDashboard:
 
     def _param_row(self, tag: str, label: str, default: str, hint: str = "") -> None:
         """Helper: one labelled input row in the parameters tab."""
+        self._param_tags.append(tag)
+        self._param_history[tag] = [str(default)]
         with dpg.group(horizontal=True):
             dpg.add_text(f"{label}:", color=(200, 200, 200))
-            dpg.add_input_text(tag=tag, default_value=default, width=120, hint=hint)
+            dpg.add_input_text(
+                tag=tag,
+                default_value=default,
+                width=220,
+                hint=hint,
+                callback=self._on_param_input_changed,
+                user_data=tag,
+            )
+
+    def _on_param_input_changed(self, _sender: Any, value: str, tag: str) -> None:
+        if self._param_undo_suppress:
+            return
+        value_s = str(value)
+        hist = self._param_history.setdefault(tag, [])
+        if not hist or hist[-1] != value_s:
+            hist.append(value_s)
+            if len(hist) > 64:
+                del hist[0]
+
+    def _build_keyboard_handlers(self) -> None:
+        with dpg.handler_registry(tag="global_key_handlers"):
+            dpg.add_key_press_handler(key=dpg.mvKey_Z, callback=self._on_ctrl_z)
+
+    def _on_ctrl_z(self, _sender: Any, _app_data: Any) -> None:
+        if not (dpg.is_key_down(dpg.mvKey_Control) or dpg.is_key_down(dpg.mvKey_LControl) or dpg.is_key_down(dpg.mvKey_RControl)):
+            return
+        active = dpg.get_active_window()
+        focused = dpg.get_focused_item()
+        target_tag: Optional[str] = None
+        if isinstance(focused, int):
+            alias = dpg.get_item_alias(focused)
+            if alias in self._param_history:
+                target_tag = alias
+        if target_tag is None and isinstance(active, int):
+            # Fallback: undo the most recently edited parameter input.
+            for tag in reversed(self._param_tags):
+                if self._param_history.get(tag):
+                    target_tag = tag
+                    break
+        if target_tag is None:
+            return
+        hist = self._param_history.get(target_tag, [])
+        if len(hist) < 2:
+            return
+        hist.pop()
+        prev = hist[-1]
+        self._param_undo_suppress = True
+        try:
+            if dpg.does_item_exist(target_tag):
+                dpg.set_value(target_tag, prev)
+        finally:
+            self._param_undo_suppress = False
 
     # ---- Parameter save callbacks ----
 
     def _save_lane_params(self) -> None:
         try:
-            from adas.lane_detection.processing import DEFAULT_PROCESSING_CONFIG
+            from adas.lane_detection.processing import LaneProcessingConfig, DEFAULT_PROCESSING_CONFIG
             import adas.lane_detection.processing as _lmod
             kw = {
                 "roi_top": float(dpg.get_value("lane_roi_top")),
@@ -456,6 +573,7 @@ class MasterDashboard:
             import dataclasses
             new_cfg = dataclasses.replace(DEFAULT_PROCESSING_CONFIG, **kw)
             _lmod.DEFAULT_PROCESSING_CONFIG = new_cfg
+            self._set_override_section("lane", kw)
             self._startup_log("Lane detection defaults saved.", (100, 220, 100))
         except Exception as exc:
             self._startup_log(f"Lane param save error: {exc}", (255, 130, 130))
@@ -475,13 +593,14 @@ class MasterDashboard:
             import adas.lane_detection.processing as _lmod
             from adas.lane_detection.processing import LaneProcessingConfig
             _lmod.DEFAULT_PROCESSING_CONFIG = LaneProcessingConfig()
+            self._remove_override_section("lane")
             self._startup_log("Lane detection defaults reset.", (200, 200, 200))
         except Exception as exc:
             self._startup_log(f"Lane reset error: {exc}", (255, 130, 130))
 
     def _save_obstacle_params(self) -> None:
         try:
-            from adas.obstacle_detection.detector import DEFAULT_DETECTOR_CONFIG
+            from adas.obstacle_detection.detector import DetectorConfig, DEFAULT_DETECTOR_CONFIG
             import adas.obstacle_detection.detector as _dmod
             import dataclasses
             kw = {
@@ -496,6 +615,7 @@ class MasterDashboard:
             }
             new_cfg = dataclasses.replace(DEFAULT_DETECTOR_CONFIG, **kw)
             _dmod.DEFAULT_DETECTOR_CONFIG = new_cfg
+            self._set_override_section("obstacle", kw)
             self._startup_log("Obstacle detection defaults saved.", (100, 220, 100))
         except Exception as exc:
             self._startup_log(f"Obstacle param save error: {exc}", (255, 130, 130))
@@ -514,13 +634,14 @@ class MasterDashboard:
             import adas.obstacle_detection.detector as _dmod
             from adas.obstacle_detection.detector import DetectorConfig
             _dmod.DEFAULT_DETECTOR_CONFIG = DetectorConfig()
+            self._remove_override_section("obstacle")
             self._startup_log("Obstacle detection defaults reset.", (200, 200, 200))
         except Exception as exc:
             self._startup_log(f"Obstacle reset error: {exc}", (255, 130, 130))
 
     def _save_risk_params(self) -> None:
         try:
-            from adas.collision_risk.estimator import DEFAULT_ESTIMATOR_CONFIG
+            from adas.collision_risk.estimator import EstimatorConfig, DEFAULT_ESTIMATOR_CONFIG
             import adas.collision_risk.estimator as _emod
             import dataclasses
             kw = {
@@ -534,6 +655,7 @@ class MasterDashboard:
             }
             new_cfg = dataclasses.replace(DEFAULT_ESTIMATOR_CONFIG, **kw)
             _emod.DEFAULT_ESTIMATOR_CONFIG = new_cfg
+            self._set_override_section("estimator", kw)
             self._startup_log("Risk estimator defaults saved.", (100, 220, 100))
         except Exception as exc:
             self._startup_log(f"Risk param save error: {exc}", (255, 130, 130))
@@ -552,13 +674,14 @@ class MasterDashboard:
             import adas.collision_risk.estimator as _emod
             from adas.collision_risk.estimator import EstimatorConfig
             _emod.DEFAULT_ESTIMATOR_CONFIG = EstimatorConfig()
+            self._remove_override_section("estimator")
             self._startup_log("Risk estimator defaults reset.", (200, 200, 200))
         except Exception as exc:
             self._startup_log(f"Risk reset error: {exc}", (255, 130, 130))
 
     def _save_decision_params(self) -> None:
         try:
-            from adas.collision_risk.decision import DEFAULT_DECISION_CONFIG
+            from adas.collision_risk.decision import DecisionConfig, DEFAULT_DECISION_CONFIG
             import adas.collision_risk.decision as _decmod
             import dataclasses
             kw = {
@@ -569,6 +692,7 @@ class MasterDashboard:
             }
             new_cfg = dataclasses.replace(DEFAULT_DECISION_CONFIG, **kw)
             _decmod.DEFAULT_DECISION_CONFIG = new_cfg
+            self._set_override_section("decision", kw)
             self._startup_log("Decision config defaults saved.", (100, 220, 100))
         except Exception as exc:
             self._startup_log(f"Decision param save error: {exc}", (255, 130, 130))
@@ -585,6 +709,7 @@ class MasterDashboard:
             import adas.collision_risk.decision as _decmod
             from adas.collision_risk.decision import DecisionConfig
             _decmod.DEFAULT_DECISION_CONFIG = DecisionConfig()
+            self._remove_override_section("decision")
             self._startup_log("Decision config defaults reset.", (200, 200, 200))
         except Exception as exc:
             self._startup_log(f"Decision reset error: {exc}", (255, 130, 130))
@@ -634,6 +759,67 @@ class MasterDashboard:
                 dpg.add_button(label="Retry Checks", width=220, height=42, callback=lambda s, a, u: self._on_run_docker(check_only=True))
                 dpg.add_button(label="Copy Log", width=220, height=42, callback=lambda s, a, u: self._copy_startup_log())
                 dpg.add_button(label="Continue", width=220, height=42, callback=lambda s, a, u: dpg.configure_item("startup_overlay", show=False))
+
+    def _build_log_window(self) -> None:
+        with dpg.window(
+            tag="log_window",
+            label="Panel Logs",
+            show=False,
+            width=980,
+            height=520,
+            pos=(250, 120),
+            no_collapse=True,
+        ):
+            dpg.add_text("Startup and process logs", color=(220, 220, 220))
+            dpg.add_separator()
+            with dpg.child_window(tag="log_window_child", height=430, border=True):
+                dpg.add_group(tag="log_window_group")
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Refresh", width=120, callback=lambda: self._refresh_log_window())
+                dpg.add_button(label="Copy", width=120, callback=self._copy_log_window)
+                dpg.add_button(label="Close", width=120, callback=lambda: dpg.configure_item("log_window", show=False))
+
+    def _open_log_window(self) -> None:
+        self._refresh_log_window()
+        dpg.configure_item("log_window", show=True)
+
+    def _refresh_log_window(self) -> None:
+        if not dpg.does_item_exist("log_window_group"):
+            return
+        dpg.delete_item("log_window_group", children_only=True)
+        lines: List[Tuple[str, Tuple[int, int, int]]] = []
+        lines.extend(self.startup_log_lines)
+        if self.process.lines:
+            if lines:
+                lines.append(("", (180, 180, 180)))
+            lines.append(("--- process output ---", (160, 200, 255)))
+            lines.extend(self.process.lines)
+        if not lines:
+            lines = [("No logs yet.", (180, 180, 180))]
+        for text, color in lines[-3000:]:
+            dpg.add_text(text, parent="log_window_group", color=color)
+        y_max = dpg.get_y_scroll_max("log_window_child")
+        dpg.set_y_scroll("log_window_child", y_max)
+
+    def _copy_log_window(self) -> None:
+        merged = [line for line, _ in self.startup_log_lines]
+        if self.process.lines:
+            merged.append("\n--- process output ---")
+            merged.extend([line for line, _ in self.process.lines])
+        text = "\n".join(merged)
+        if os.name == "nt":
+            process = subprocess.Popen(["clip.exe"], stdin=subprocess.PIPE, text=True)
+            process.communicate(input=text)
+        else:
+            try:
+                process = subprocess.Popen(["xclip", "-selection", "clipboard"], stdin=subprocess.PIPE, text=True)
+                process.communicate(input=text)
+            except FileNotFoundError:
+                try:
+                    process = subprocess.Popen(["xsel", "-b", "-i"], stdin=subprocess.PIPE, text=True)
+                    process.communicate(input=text)
+                except FileNotFoundError:
+                    pass
 
     def _startup_log(self, line: str, color: Tuple[int, int, int] = (220, 220, 220)) -> None:
         self._startup_queue.put((line, color))
@@ -837,16 +1023,208 @@ class MasterDashboard:
         try:
             vp_w = dpg.get_viewport_client_width() or 1680
             vp_h = dpg.get_viewport_client_height() or 980
-            panel_w = 440
+            panel_w = self.actions_panel_width
             table_w = max(800, vp_w - panel_w - 40)
             # Keep a small bottom margin so the root window itself never needs to scroll.
             h = max(500, vp_h - 28)
             if dpg.does_item_exist("table_card"):
                 dpg.configure_item("table_card", width=table_w, height=h)
             if dpg.does_item_exist("actions_panel"):
-                dpg.configure_item("actions_panel", height=h)
+                dpg.configure_item("actions_panel", width=panel_w, height=h)
+            telemetry_h = int(h * 0.30)
+            telemetry_h = max(200, min(340, telemetry_h))
+            if dpg.does_item_exist("runtime_metrics_card"):
+                dpg.configure_item("runtime_metrics_card", height=telemetry_h)
+            if dpg.does_item_exist("actions_tabs_container"):
+                tabs_h = max(180, h - telemetry_h - 96)
+                dpg.configure_item("actions_tabs_container", height=tabs_h)
         except Exception:
             pass
+
+    def _start_telemetry_thread(self) -> None:
+        if self._telemetry_thread is not None and self._telemetry_thread.is_alive():
+            return
+        self._telemetry_stop.clear()
+        self._telemetry_thread = threading.Thread(target=self._telemetry_loop, daemon=True)
+        self._telemetry_thread.start()
+
+    def _stop_telemetry_thread(self) -> None:
+        self._telemetry_stop.set()
+        if self._telemetry_thread is not None:
+            self._telemetry_thread.join(timeout=1.0)
+
+    def _telemetry_loop(self) -> None:
+        while not self._telemetry_stop.is_set():
+            stats = self._collect_container_metrics()
+            self._telemetry_queue.put(stats)
+            self._telemetry_stop.wait(0.5)
+
+    def _collect_container_metrics(self) -> Dict[str, Any]:
+        code = (
+            "import json; "
+            "cpu={}; "
+            "f=open('/proc/stat','r'); "
+            "lines=f.readlines(); f.close(); "
+            "\nfor line in lines:\n"
+            "  p=line.split();\n"
+            "  if p and p[0].startswith('cpu') and p[0][3:].isdigit():\n"
+            "    vals=[int(x) for x in p[1:8]]; cpu[p[0]]=vals;\n"
+            "mem={}; "
+            "f=open('/proc/meminfo','r'); "
+            "\nfor line in f:\n"
+            "  if line.startswith('MemTotal:') or line.startswith('MemAvailable:'):\n"
+            "    k,v=line.split(':',1); mem[k]=int(v.strip().split()[0]);\n"
+            "f.close(); "
+            "load=open('/proc/loadavg','r').read().strip().split(); "
+            "up=open('/proc/uptime','r').read().strip().split()[0]; "
+            "print(json.dumps({'cpu':cpu,'mem':mem,'load':load[:3],'procs':load[3],'uptime':up}))"
+        )
+        cmd = self._docker_exec_cmd(["python", "-c", code])
+        rc, out = self._run_short_command(cmd, timeout=3)
+        if rc != 0:
+            return {"ok": False, "error": out.strip() or "docker metrics unavailable"}
+        try:
+            payload = json.loads(out.strip().splitlines()[-1])
+        except Exception:
+            return {"ok": False, "error": "failed to parse docker metrics"}
+
+        cpu_snap: Dict[str, Tuple[int, int]] = {}
+        core_usage: Dict[str, float] = {}
+        for core, vals in payload.get("cpu", {}).items():
+            if len(vals) < 5:
+                continue
+            idle = int(vals[3]) + int(vals[4])
+            total = sum(int(v) for v in vals)
+            cpu_snap[core] = (total, idle)
+            if self._prev_cpu_snapshot and core in self._prev_cpu_snapshot:
+                prev_total, prev_idle = self._prev_cpu_snapshot[core]
+                dt = total - prev_total
+                di = idle - prev_idle
+                if dt > 0:
+                    usage = (1.0 - (di / dt)) * 100.0
+                    core_usage[core] = max(0.0, min(100.0, usage))
+        self._prev_cpu_snapshot = cpu_snap
+
+        mem = payload.get("mem", {})
+        mem_total = float(mem.get("MemTotal", 0.0))
+        mem_avail = float(mem.get("MemAvailable", 0.0))
+        mem_used = max(0.0, mem_total - mem_avail)
+        mem_pct = (mem_used / mem_total * 100.0) if mem_total > 0 else 0.0
+
+        return {
+            "ok": True,
+            "core_usage": core_usage,
+            "mem_pct": mem_pct,
+            "mem_used_mib": mem_used / 1024.0,
+            "mem_total_mib": mem_total / 1024.0,
+            "load": payload.get("load", ["n/a", "n/a", "n/a"]),
+            "procs": payload.get("procs", "n/a"),
+            "uptime_s": float(payload.get("uptime", 0.0) or 0.0),
+        }
+
+    def _drain_telemetry_output(self) -> None:
+        updated = False
+        while True:
+            try:
+                self._latest_telemetry = self._telemetry_queue.get_nowait()
+                updated = True
+            except queue.Empty:
+                break
+        if updated:
+            self._render_telemetry()
+
+    def _util_color(self, percent: float) -> Tuple[int, int, int]:
+        if percent >= 90.0:
+            return (240, 95, 95)
+        if percent >= 80.0:
+            return (245, 175, 80)
+        return (120, 220, 130)
+
+    def _render_telemetry(self) -> None:
+        if not self._latest_telemetry:
+            return
+        stats = self._latest_telemetry
+        if not stats.get("ok"):
+            msg = stats.get("error", "docker metrics unavailable")
+            if dpg.does_item_exist("docker_status"):
+                dpg.set_value("docker_status", f"Container: unavailable ({msg[:70]})")
+                dpg.configure_item("docker_status", color=(245, 165, 120))
+            return
+
+        for i in range(4):
+            tag = f"docker_core_{i}"
+            if not dpg.does_item_exist(tag):
+                continue
+            core_name = f"cpu{i}"
+            val = stats.get("core_usage", {}).get(core_name)
+            if val is None:
+                dpg.set_value(tag, f"core{i}: warming up...")
+                dpg.configure_item(tag, color=(180, 180, 180))
+            else:
+                dpg.set_value(tag, f"core{i}: {val:5.1f}%")
+                dpg.configure_item(tag, color=self._util_color(val))
+
+        mem_pct = float(stats.get("mem_pct", 0.0))
+        mem_used = float(stats.get("mem_used_mib", 0.0))
+        mem_total = float(stats.get("mem_total_mib", 0.0))
+        dpg.set_value("docker_mem", f"RAM: {mem_used:.0f}/{mem_total:.0f} MiB ({mem_pct:.1f}%)")
+        dpg.configure_item("docker_mem", color=self._util_color(mem_pct))
+
+        load = stats.get("load", ["n/a", "n/a", "n/a"])
+        dpg.set_value("docker_load", f"Load avg: {load[0]}, {load[1]}, {load[2]}")
+        dpg.configure_item("docker_load", color=(180, 210, 255))
+        dpg.set_value("docker_procs", f"Processes: {stats.get('procs', 'n/a')}")
+        dpg.configure_item("docker_procs", color=(180, 180, 180))
+        dpg.set_value("docker_status", "Container: running")
+        dpg.configure_item("docker_status", color=(120, 220, 130))
+
+    def _load_runtime_overrides(self) -> Dict[str, Any]:
+        try:
+            if not os.path.exists(self.runtime_overrides_path):
+                return {}
+            with open(self.runtime_overrides_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _persist_runtime_overrides(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self.runtime_overrides_path), exist_ok=True)
+            with open(self.runtime_overrides_path, "w", encoding="utf-8") as fh:
+                json.dump(self._runtime_overrides, fh, indent=2, sort_keys=True)
+        except Exception as exc:
+            self._startup_log(f"Override save error: {exc}", (255, 130, 130))
+
+    def _set_override_section(self, section: str, values: Dict[str, Any]) -> None:
+        self._runtime_overrides[section] = values
+        self._persist_runtime_overrides()
+
+    def _remove_override_section(self, section: str) -> None:
+        self._runtime_overrides.pop(section, None)
+        self._persist_runtime_overrides()
+
+    def _apply_runtime_overrides_to_inputs(self) -> None:
+        if not self._runtime_overrides:
+            return
+        context_cfg = self._runtime_overrides.get("context", {})
+        if isinstance(context_cfg, dict) and dpg.does_item_exist("ctx_interval"):
+            if "context_interval" in context_cfg:
+                dpg.set_value("ctx_interval", str(context_cfg["context_interval"]))
+
+        mapping: List[Tuple[str, str, Dict[str, Any]]] = [
+            ("lane", "lane_", self._runtime_overrides.get("lane", {})),
+            ("obstacle", "obs_", self._runtime_overrides.get("obstacle", {})),
+            ("estimator", "risk_", self._runtime_overrides.get("estimator", {})),
+            ("decision", "dec_", self._runtime_overrides.get("decision", {})),
+        ]
+        for _section, prefix, values in mapping:
+            if not isinstance(values, dict):
+                continue
+            for key, value in values.items():
+                tag = f"{prefix}{key}"
+                if dpg.does_item_exist(tag):
+                    dpg.set_value(tag, str(value))
 
     def _is_port_open(self, host: str, port: int) -> bool:
         try:
@@ -1197,6 +1575,7 @@ class MasterDashboard:
         if sel is None:
             return
         cat, vid = sel
+        self._set_override_section("context", {"context_interval": dpg.get_value("ctx_interval").strip() or "5"})
         cmd = self._docker_exec_cmd([
             "python",
             "scripts/run_scenario.py",
@@ -1398,9 +1777,6 @@ class MasterDashboard:
         self.process.lines.clear()
         self.process.title = title
 
-        # Minimize master panel so the spawned GUI window gets focus
-        dpg.minimize_viewport()
-
         color = (140, 200, 255)
         self._append_process_line("$ " + " ".join(shlex.quote(p) for p in cmd), color)
         self._active_kill_pattern = self._extract_kill_pattern(cmd)
@@ -1576,7 +1952,6 @@ class MasterDashboard:
             self._show_toast("Process is still running. Cancel first.")
             return
         dpg.configure_item("process_overlay", show=False)
-        dpg.maximize_viewport()
 
     def _copy_process_log(self) -> None:
         text = "\n".join([line for line, _ in self.process.lines])
