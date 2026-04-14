@@ -22,7 +22,7 @@ class TestScenarioConfig:
         cfg = ScenarioConfig()
         assert cfg.category_id == 1
         assert cfg.video_id == 1
-        assert cfg.ui_backend == "cv2"
+        assert cfg.ui_backend == "dpg"
         assert cfg.target_fps == 30.0
         assert cfg.context_interval == 5
 
@@ -56,10 +56,10 @@ class TestFrameResult:
         assert r.risks == []
         assert r.annotation_label == "unknown"
 
-    def test_frozen(self):
+    def test_mutable(self):
         r = FrameResult()
-        with pytest.raises((AttributeError, TypeError)):
-            r.frame_idx = 5  # type: ignore[misc]
+        r.frame_idx = 5
+        assert r.frame_idx == 5
 
 
 # ---------------------------------------------------------------------------
