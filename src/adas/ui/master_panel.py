@@ -593,7 +593,7 @@ class MasterDashboard:
 
     def _save_lane_params(self) -> None:
         try:
-            from adas.lane_detection.processing import LaneProcessingConfig, DEFAULT_PROCESSING_CONFIG
+            from adas.lane_detection.processing import DEFAULT_PROCESSING_CONFIG
             import adas.lane_detection.processing as _lmod
             kw = {
                 "roi_top": float(dpg.get_value("lane_roi_top")),
@@ -638,7 +638,7 @@ class MasterDashboard:
 
     def _save_obstacle_params(self) -> None:
         try:
-            from adas.obstacle_detection.detector import DetectorConfig, DEFAULT_DETECTOR_CONFIG
+            from adas.obstacle_detection.detector import DEFAULT_DETECTOR_CONFIG
             import adas.obstacle_detection.detector as _dmod
             import dataclasses
             kw = {
@@ -679,7 +679,7 @@ class MasterDashboard:
 
     def _save_risk_params(self) -> None:
         try:
-            from adas.collision_risk.estimator import EstimatorConfig, DEFAULT_ESTIMATOR_CONFIG
+            from adas.collision_risk.estimator import DEFAULT_ESTIMATOR_CONFIG
             import adas.collision_risk.estimator as _emod
             import dataclasses
             kw = {
@@ -719,7 +719,7 @@ class MasterDashboard:
 
     def _save_decision_params(self) -> None:
         try:
-            from adas.collision_risk.decision import DecisionConfig, DEFAULT_DECISION_CONFIG
+            from adas.collision_risk.decision import DEFAULT_DECISION_CONFIG
             import adas.collision_risk.decision as _decmod
             import dataclasses
             kw = {
