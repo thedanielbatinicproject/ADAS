@@ -20,6 +20,13 @@ import dearpygui.dearpygui as dpg
 
 from adas.utils.runtime_overrides import get_runtime_overrides_path
 
+try:
+    from PIL import Image
+    import numpy as np
+    _HAS_PIL = True
+except ImportError:
+    _HAS_PIL = False
+
 
 @dataclass
 class ProcessState:
@@ -84,6 +91,20 @@ class MasterDashboard:
         self.runtime_overrides_path = get_runtime_overrides_path(self.project_root)
         self._runtime_overrides = self._load_runtime_overrides()
 
+        # Configurator state
+        self._cfg_proc: Optional[subprocess.Popen] = None
+        self._cfg_thread: Optional[threading.Thread] = None
+        self._cfg_queue: queue.Queue[Tuple[str, Tuple[int, int, int]]] = queue.Queue()
+        self._cfg_lines: List[Tuple[str, Tuple[int, int, int]]] = []
+        self._cfg_running = False
+        self._cfg_stream_dir = os.path.join(self.project_root, "data", "processed", "configurator_stream")
+        self._cfg_latest_mtime: float = 0.0
+        self._cfg_texture_tag = "cfg_texture"
+        self._cfg_frame_w = 640
+        self._cfg_frame_h = 360
+        self._cfg_paused = False
+        self._cfg_suppress_slider = False
+
     def run(self) -> None:
         dpg.create_context()
         self._build_theme()
@@ -103,10 +124,14 @@ class MasterDashboard:
             self._drain_process_output()
             self._drain_telemetry_output()
             self._poll_process_end()
+            self._drain_configurator_output()
+            self._poll_configurator_end()
+            self._render_configurator_frame()
             dpg.render_dearpygui_frame()
 
         self._stop_telemetry_thread()
         self._cancel_active_process()
+        self._stop_configurator()
         dpg.destroy_context()
 
     def _build_theme(self) -> None:
@@ -136,6 +161,12 @@ class MasterDashboard:
                 dpg.add_theme_color(dpg.mvThemeCol_Border, (70, 210, 70))
                 dpg.add_theme_style(dpg.mvStyleVar_ChildBorderSize, 2)
         self._run_card_theme = run_theme
+
+        with dpg.theme() as cfg_theme:
+            with dpg.theme_component(dpg.mvChildWindow):
+                dpg.add_theme_color(dpg.mvThemeCol_Border, (180, 120, 255))
+                dpg.add_theme_style(dpg.mvStyleVar_ChildBorderSize, 2)
+        self._cfg_card_theme = cfg_theme
 
     def _build_ui(self) -> None:
         with dpg.window(tag="root", no_title_bar=True, no_move=True, no_resize=True, width=-1, height=-1):
@@ -213,8 +244,8 @@ class MasterDashboard:
             height=-1,
             border=True,
             tag="actions_panel",
-            no_scrollbar=True,
-            no_scroll_with_mouse=True,
+            no_scrollbar=False,
+            no_scroll_with_mouse=False,
         ):
             dpg.add_text("Selected Video", color=(200, 220, 255))
             dpg.add_text("None", tag="selected_video_label", color=(255, 255, 255))
@@ -224,13 +255,14 @@ class MasterDashboard:
                 height=-1,
                 border=False,
                 tag="actions_tabs_container",
-                no_scrollbar=True,
-                no_scroll_with_mouse=True,
+                no_scrollbar=False,
+                no_scroll_with_mouse=False,
             ):
                 with dpg.tab_bar():
                     with dpg.tab(label="Simulation"):
                         self._build_run_simulation_card()
                         self._build_play_video_card()
+                        self._build_configurator_launcher_card()
                     with dpg.tab(label="Dataset"):
                         self._build_build_index_card()
                         self._build_sample_conditions_card()
@@ -522,7 +554,13 @@ class MasterDashboard:
             dpg.add_key_press_handler(key=dpg.mvKey_Z, callback=self._on_ctrl_z)
 
     def _on_ctrl_z(self, _sender: Any, _app_data: Any) -> None:
-        if not (dpg.is_key_down(dpg.mvKey_Control) or dpg.is_key_down(dpg.mvKey_LControl) or dpg.is_key_down(dpg.mvKey_RControl)):
+        ctrl_down = False
+        for key_name in ("mvKey_Control", "mvKey_LControl", "mvKey_RControl"):
+            key = getattr(dpg, key_name, None)
+            if key is not None and dpg.is_key_down(key):
+                ctrl_down = True
+                break
+        if not ctrl_down:
             return
         active = dpg.get_active_window()
         focused = dpg.get_focused_item()
@@ -713,6 +751,636 @@ class MasterDashboard:
             self._startup_log("Decision config defaults reset.", (200, 200, 200))
         except Exception as exc:
             self._startup_log(f"Decision reset error: {exc}", (255, 130, 130))
+
+    # ------------------------------------------------------------------
+    # Configurator launcher card (inside Simulation tab)
+    # ------------------------------------------------------------------
+
+    def _build_configurator_launcher_card(self) -> None:
+        with dpg.child_window(height=140, border=True, tag="card_configurator_launcher"):
+            dpg.add_text("Run Configuration Simulation", color=(180, 120, 255))
+            dpg.add_spacer(height=4)
+            dpg.add_text("category_id: null", tag="cfg_launcher_category")
+            dpg.add_text("video_id: null", tag="cfg_launcher_video")
+            dpg.add_spacer(height=4)
+            dpg.add_button(label="Run Configurator", width=-1, height=36, callback=self._open_configurator)
+        if self._cfg_card_theme is not None:
+            dpg.bind_item_theme("card_configurator_launcher", self._cfg_card_theme)
+
+    # ------------------------------------------------------------------
+    # Configurator window (separate non-modal DPG window)
+    # ------------------------------------------------------------------
+
+    def _open_configurator(self) -> None:
+        sel = self._ensure_selected()
+        if sel is None:
+            return
+        if not _HAS_PIL:
+            self._show_toast("Pillow (PIL) is required for the configurator live preview.")
+            return
+        cat, vid = sel
+        if dpg.does_item_exist("cfg_window"):
+            dpg.configure_item("cfg_window", show=True)
+            dpg.focus_item("cfg_window")
+            return
+        self._build_configurator_window(cat, vid)
+        self._start_configurator(cat, vid)
+
+    def _build_configurator_window(self, cat: int, vid: int) -> None:
+        # Texture for live preview
+        with dpg.texture_registry():
+            blank = [0.0] * (self._cfg_frame_w * self._cfg_frame_h * 4)
+            dpg.add_dynamic_texture(
+                width=self._cfg_frame_w,
+                height=self._cfg_frame_h,
+                default_value=blank,
+                tag=self._cfg_texture_tag,
+            )
+
+        with dpg.window(
+            tag="cfg_window",
+            label=f"Configurator  |  cat={cat}  vid={vid}",
+            show=True,
+            width=1100,
+            height=820,
+            pos=(60, 30),
+            no_collapse=True,
+            on_close=self._on_configurator_close,
+        ):
+            with dpg.group(horizontal=True):
+                # ---- LEFT PANE: preview + controls ----
+                with dpg.child_window(width=660, height=-1, border=False):
+                    dpg.add_text("Live Preview", color=(160, 220, 255))
+                    dpg.add_image(self._cfg_texture_tag, width=self._cfg_frame_w, height=self._cfg_frame_h)
+                    dpg.add_text("Status: waiting...", tag="cfg_status_text", color=(180, 180, 180))
+                    dpg.add_separator()
+                    dpg.add_slider_int(
+                        tag="cfg_frame_slider", default_value=0,
+                        min_value=0, max_value=1, width=-1,
+                        callback=self._cfg_on_slider_changed,
+                    )
+                    with dpg.group(horizontal=True):
+                        dpg.add_button(label="|<", width=40, height=30, callback=self._cfg_first_frame)
+                        dpg.add_button(label="<<", width=40, height=30, callback=self._cfg_prev_frame)
+                        dpg.add_button(label="Pause", width=70, height=30, tag="cfg_pause_btn", callback=self._cfg_toggle_pause)
+                        dpg.add_button(label=">>", width=40, height=30, callback=self._cfg_next_frame)
+                        dpg.add_button(label=">|", width=40, height=30, callback=self._cfg_last_frame)
+                        dpg.add_spacer(width=12)
+                        dpg.add_button(label="Restart", width=80, height=30, callback=self._restart_configurator)
+                        dpg.add_button(label="Stop", width=80, height=30, callback=self._stop_configurator)
+                    dpg.add_separator()
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("Docker Log", color=(160, 200, 160))
+                        dpg.add_spacer(width=12)
+                        dpg.add_button(label="Clear Log", width=80, height=22, callback=self._cfg_clear_log)
+                        dpg.add_button(label="Copy Log", width=80, height=22, callback=self._cfg_copy_log)
+                    with dpg.child_window(tag="cfg_log_child", height=-1, border=True):
+                        dpg.add_group(tag="cfg_log_group")
+
+                # ---- RIGHT PANE: all parameters ----
+                with dpg.child_window(width=-1, height=-1, border=True):
+                    dpg.add_text("Algorithm Parameters", color=(255, 220, 100))
+                    dpg.add_text(
+                        "Edit values — changes apply live instantly.\nClick Save All to persist for future runs.",
+                        color=(170, 170, 170), wrap=380,
+                    )
+                    dpg.add_separator()
+                    self._build_cfg_params()
+
+    def _build_cfg_params(self) -> None:
+        """Mirror all parameters from the Parameters tab in the configurator window."""
+        # Lane Detection
+        with dpg.collapsing_header(label="Lane Detection", default_open=True):
+            self._cfg_param_row("cfg_lane_roi_top", "roi_top", "0.38")
+            self._cfg_param_row("cfg_lane_roi_bottom", "roi_bottom", "0.90")
+            self._cfg_param_row("cfg_lane_canny_low", "canny_low", "40")
+            self._cfg_param_row("cfg_lane_canny_high", "canny_high", "120")
+            self._cfg_param_row("cfg_lane_clahe_clip", "clahe_clip", "1.8")
+            self._cfg_param_row("cfg_lane_hough_threshold", "hough_threshold", "35")
+            self._cfg_param_row("cfg_lane_hough_min_length", "hough_min_length", "30")
+            self._cfg_param_row("cfg_lane_hough_max_gap", "hough_max_gap", "130")
+            self._cfg_param_row("cfg_lane_damping_alpha", "damping_alpha", "0.65")
+            self._cfg_param_row("cfg_lane_max_shift_px", "max_shift_px", "80.0")
+        dpg.add_spacer(height=4)
+
+        # Obstacle Detection
+        with dpg.collapsing_header(label="Obstacle Detection", default_open=True):
+            self._cfg_param_row("cfg_obs_roi_top", "roi_top", "0.30")
+            self._cfg_param_row("cfg_obs_roi_bottom", "roi_bottom", "0.90")
+            self._cfg_param_row("cfg_obs_min_area", "min_area", "400.0")
+            self._cfg_param_row("cfg_obs_mog2_var_threshold", "mog2_var_threshold", "50.0")
+            self._cfg_param_row("cfg_obs_mog2_learning_rate", "mog2_learning_rate", "0.005")
+            self._cfg_param_row("cfg_obs_morph_kernel_size", "morph_kernel_size", "5")
+            self._cfg_param_row("cfg_obs_min_confidence", "min_confidence", "0.3")
+            self._cfg_param_row("cfg_obs_focal_length_px", "focal_length_px", "700.0")
+        dpg.add_spacer(height=4)
+
+        # Collision Risk Estimator
+        with dpg.collapsing_header(label="Collision Risk Estimator", default_open=True):
+            self._cfg_param_row("cfg_risk_ttc_warning_s", "ttc_warning_s", "3.0")
+            self._cfg_param_row("cfg_risk_ttc_brake_s", "ttc_brake_s", "1.5")
+            self._cfg_param_row("cfg_risk_max_ttc_s", "max_ttc_s", "10.0")
+            self._cfg_param_row("cfg_risk_max_distance_m", "max_distance_m", "40.0")
+            self._cfg_param_row("cfg_risk_proximity_weight", "proximity_weight", "0.35")
+            self._cfg_param_row("cfg_risk_ttc_weight", "ttc_weight", "0.50")
+            self._cfg_param_row("cfg_risk_lateral_weight", "lateral_weight", "0.15")
+        dpg.add_spacer(height=4)
+
+        # Decision
+        with dpg.collapsing_header(label="Decision Config", default_open=True):
+            self._cfg_param_row("cfg_dec_warn_score_threshold", "warn_score_threshold", "0.35")
+            self._cfg_param_row("cfg_dec_brake_score_threshold", "brake_score_threshold", "0.65")
+            self._cfg_param_row("cfg_dec_ttc_warn_s", "ttc_warn_s", "3.0")
+            self._cfg_param_row("cfg_dec_ttc_brake_s", "ttc_brake_s", "1.5")
+
+        dpg.add_spacer(height=8)
+        dpg.add_separator()
+        with dpg.group(horizontal=True):
+            dpg.add_button(label="Save All", width=160, height=32, callback=self._cfg_save_all)
+            dpg.add_button(label="Reset All", width=160, height=32, callback=self._cfg_reset_all)
+
+        # Sync current overrides into configurator inputs
+        self._sync_cfg_params_from_overrides()
+
+    def _cfg_param_row(self, tag: str, label: str, default: str) -> None:
+        with dpg.group(horizontal=True):
+            dpg.add_text(f"{label} ({default}):", color=(200, 200, 200))
+            dpg.add_input_text(
+                tag=tag, default_value=default, width=180,
+                callback=self._on_cfg_param_changed, user_data=tag,
+            )
+
+    def _on_cfg_param_changed(self, sender: Any, value: str, tag: str) -> None:
+        """Auto-format value and live-save overrides so Docker picks them up immediately."""
+        # Auto-format: ".34" -> "0.34", "-.5" -> "-0.5"
+        v = str(value).strip()
+        if v.startswith(".") and len(v) > 1:
+            v = "0" + v
+        elif v.startswith("-.") and len(v) > 2:
+            v = "-0" + v[1:]
+        if v != value:
+            dpg.set_value(tag, v)
+        # Log the change
+        param_name = tag.replace("cfg_", "", 1)
+        self._cfg_log(f"[param] {param_name} = {v}", (200, 200, 255))
+        # Live-save: persist to runtime_overrides.json so the running Docker process picks it up
+        self._cfg_live_save()
+
+    def _cfg_live_save(self) -> None:
+        """Silently persist all configurator params to runtime_overrides.json."""
+        def _safe_float(tag: str, fallback: float = 0.0) -> float:
+            try:
+                return float(dpg.get_value(tag))
+            except (ValueError, TypeError):
+                return fallback
+
+        def _safe_int(tag: str, fallback: int = 0) -> int:
+            try:
+                return int(float(dpg.get_value(tag)))
+            except (ValueError, TypeError):
+                return fallback
+
+        try:
+            self._set_override_section("lane", {
+                "roi_top": _safe_float("cfg_lane_roi_top", 0.38),
+                "roi_bottom": _safe_float("cfg_lane_roi_bottom", 0.90),
+                "canny_low": _safe_int("cfg_lane_canny_low", 40),
+                "canny_high": _safe_int("cfg_lane_canny_high", 120),
+                "clahe_clip": _safe_float("cfg_lane_clahe_clip", 1.8),
+                "hough_threshold": _safe_int("cfg_lane_hough_threshold", 35),
+                "hough_min_length": _safe_int("cfg_lane_hough_min_length", 30),
+                "hough_max_gap": _safe_int("cfg_lane_hough_max_gap", 130),
+                "damping_alpha": _safe_float("cfg_lane_damping_alpha", 0.65),
+                "max_shift_px": _safe_float("cfg_lane_max_shift_px", 80.0),
+            })
+            self._set_override_section("obstacle", {
+                "roi_top": _safe_float("cfg_obs_roi_top", 0.30),
+                "roi_bottom": _safe_float("cfg_obs_roi_bottom", 0.90),
+                "min_area": _safe_float("cfg_obs_min_area", 400.0),
+                "mog2_var_threshold": _safe_float("cfg_obs_mog2_var_threshold", 50.0),
+                "mog2_learning_rate": _safe_float("cfg_obs_mog2_learning_rate", 0.005),
+                "morph_kernel_size": _safe_int("cfg_obs_morph_kernel_size", 5),
+                "min_confidence": _safe_float("cfg_obs_min_confidence", 0.3),
+                "focal_length_px": _safe_float("cfg_obs_focal_length_px", 700.0),
+            })
+            self._set_override_section("estimator", {
+                "ttc_warning_s": _safe_float("cfg_risk_ttc_warning_s", 3.0),
+                "ttc_brake_s": _safe_float("cfg_risk_ttc_brake_s", 1.5),
+                "max_ttc_s": _safe_float("cfg_risk_max_ttc_s", 10.0),
+                "max_distance_m": _safe_float("cfg_risk_max_distance_m", 40.0),
+                "proximity_weight": _safe_float("cfg_risk_proximity_weight", 0.35),
+                "ttc_weight": _safe_float("cfg_risk_ttc_weight", 0.50),
+                "lateral_weight": _safe_float("cfg_risk_lateral_weight", 0.15),
+            })
+            self._set_override_section("decision", {
+                "warn_score_threshold": _safe_float("cfg_dec_warn_score_threshold", 0.35),
+                "brake_score_threshold": _safe_float("cfg_dec_brake_score_threshold", 0.65),
+                "ttc_warn_s": _safe_float("cfg_dec_ttc_warn_s", 3.0),
+                "ttc_brake_s": _safe_float("cfg_dec_ttc_brake_s", 1.5),
+            })
+        except Exception:
+            pass
+
+    def _sync_cfg_params_from_overrides(self) -> None:
+        """Copy current runtime overrides to configurator input fields."""
+        mapping = [
+            ("lane", "cfg_lane_", self._runtime_overrides.get("lane", {})),
+            ("obstacle", "cfg_obs_", self._runtime_overrides.get("obstacle", {})),
+            ("estimator", "cfg_risk_", self._runtime_overrides.get("estimator", {})),
+            ("decision", "cfg_dec_", self._runtime_overrides.get("decision", {})),
+        ]
+        for _section, prefix, values in mapping:
+            if not isinstance(values, dict):
+                continue
+            for key, value in values.items():
+                tag = f"{prefix}{key}"
+                if dpg.does_item_exist(tag):
+                    dpg.set_value(tag, str(value))
+
+        # Also sync from main Parameters tab inputs
+        src_dst = [
+            ("lane_roi_top", "cfg_lane_roi_top"),
+            ("lane_roi_bottom", "cfg_lane_roi_bottom"),
+            ("lane_canny_low", "cfg_lane_canny_low"),
+            ("lane_canny_high", "cfg_lane_canny_high"),
+            ("lane_clahe_clip", "cfg_lane_clahe_clip"),
+            ("lane_hough_threshold", "cfg_lane_hough_threshold"),
+            ("lane_hough_min_length", "cfg_lane_hough_min_length"),
+            ("lane_hough_max_gap", "cfg_lane_hough_max_gap"),
+            ("lane_damping_alpha", "cfg_lane_damping_alpha"),
+            ("lane_max_shift_px", "cfg_lane_max_shift_px"),
+            ("obs_roi_top", "cfg_obs_roi_top"),
+            ("obs_roi_bottom", "cfg_obs_roi_bottom"),
+            ("obs_min_area", "cfg_obs_min_area"),
+            ("obs_mog2_var_threshold", "cfg_obs_mog2_var_threshold"),
+            ("obs_mog2_learning_rate", "cfg_obs_mog2_learning_rate"),
+            ("obs_morph_kernel_size", "cfg_obs_morph_kernel_size"),
+            ("obs_min_confidence", "cfg_obs_min_confidence"),
+            ("obs_focal_length_px", "cfg_obs_focal_length_px"),
+            ("risk_ttc_warning_s", "cfg_risk_ttc_warning_s"),
+            ("risk_ttc_brake_s", "cfg_risk_ttc_brake_s"),
+            ("risk_max_ttc_s", "cfg_risk_max_ttc_s"),
+            ("risk_max_distance_m", "cfg_risk_max_distance_m"),
+            ("risk_proximity_weight", "cfg_risk_proximity_weight"),
+            ("risk_ttc_weight", "cfg_risk_ttc_weight"),
+            ("risk_lateral_weight", "cfg_risk_lateral_weight"),
+            ("dec_warn_score_threshold", "cfg_dec_warn_score_threshold"),
+            ("dec_brake_score_threshold", "cfg_dec_brake_score_threshold"),
+            ("dec_ttc_warn_s", "cfg_dec_ttc_warn_s"),
+            ("dec_ttc_brake_s", "cfg_dec_ttc_brake_s"),
+        ]
+        for src, dst in src_dst:
+            if dpg.does_item_exist(src) and dpg.does_item_exist(dst):
+                dpg.set_value(dst, dpg.get_value(src))
+
+    # ------------------------------------------------------------------
+    # Configurator Save / Reset
+    # ------------------------------------------------------------------
+
+    def _cfg_save_all(self) -> None:
+        """Read all configurator inputs, persist overrides, and sync back to Parameters tab."""
+        try:
+            lane_kw = {
+                "roi_top": float(dpg.get_value("cfg_lane_roi_top")),
+                "roi_bottom": float(dpg.get_value("cfg_lane_roi_bottom")),
+                "canny_low": int(float(dpg.get_value("cfg_lane_canny_low"))),
+                "canny_high": int(float(dpg.get_value("cfg_lane_canny_high"))),
+                "clahe_clip": float(dpg.get_value("cfg_lane_clahe_clip")),
+                "hough_threshold": int(float(dpg.get_value("cfg_lane_hough_threshold"))),
+                "hough_min_length": int(float(dpg.get_value("cfg_lane_hough_min_length"))),
+                "hough_max_gap": int(float(dpg.get_value("cfg_lane_hough_max_gap"))),
+                "damping_alpha": float(dpg.get_value("cfg_lane_damping_alpha")),
+                "max_shift_px": float(dpg.get_value("cfg_lane_max_shift_px")),
+            }
+            self._set_override_section("lane", lane_kw)
+
+            obs_kw = {
+                "roi_top": float(dpg.get_value("cfg_obs_roi_top")),
+                "roi_bottom": float(dpg.get_value("cfg_obs_roi_bottom")),
+                "min_area": float(dpg.get_value("cfg_obs_min_area")),
+                "mog2_var_threshold": float(dpg.get_value("cfg_obs_mog2_var_threshold")),
+                "mog2_learning_rate": float(dpg.get_value("cfg_obs_mog2_learning_rate")),
+                "morph_kernel_size": int(float(dpg.get_value("cfg_obs_morph_kernel_size"))),
+                "min_confidence": float(dpg.get_value("cfg_obs_min_confidence")),
+                "focal_length_px": float(dpg.get_value("cfg_obs_focal_length_px")),
+            }
+            self._set_override_section("obstacle", obs_kw)
+
+            risk_kw = {
+                "ttc_warning_s": float(dpg.get_value("cfg_risk_ttc_warning_s")),
+                "ttc_brake_s": float(dpg.get_value("cfg_risk_ttc_brake_s")),
+                "max_ttc_s": float(dpg.get_value("cfg_risk_max_ttc_s")),
+                "max_distance_m": float(dpg.get_value("cfg_risk_max_distance_m")),
+                "proximity_weight": float(dpg.get_value("cfg_risk_proximity_weight")),
+                "ttc_weight": float(dpg.get_value("cfg_risk_ttc_weight")),
+                "lateral_weight": float(dpg.get_value("cfg_risk_lateral_weight")),
+            }
+            self._set_override_section("estimator", risk_kw)
+
+            dec_kw = {
+                "warn_score_threshold": float(dpg.get_value("cfg_dec_warn_score_threshold")),
+                "brake_score_threshold": float(dpg.get_value("cfg_dec_brake_score_threshold")),
+                "ttc_warn_s": float(dpg.get_value("cfg_dec_ttc_warn_s")),
+                "ttc_brake_s": float(dpg.get_value("cfg_dec_ttc_brake_s")),
+            }
+            self._set_override_section("decision", dec_kw)
+
+            # Sync back to the Parameters tab inputs
+            self._apply_runtime_overrides_to_inputs()
+            self._cfg_log("All parameters saved.", (100, 220, 100))
+        except Exception as exc:
+            self._cfg_log(f"Save error: {exc}", (255, 130, 130))
+
+    def _cfg_reset_all(self) -> None:
+        """Reset all configurator inputs to factory defaults."""
+        defaults = {
+            "cfg_lane_roi_top": "0.38", "cfg_lane_roi_bottom": "0.90",
+            "cfg_lane_canny_low": "40", "cfg_lane_canny_high": "120",
+            "cfg_lane_clahe_clip": "1.8", "cfg_lane_hough_threshold": "35",
+            "cfg_lane_hough_min_length": "30", "cfg_lane_hough_max_gap": "130",
+            "cfg_lane_damping_alpha": "0.65", "cfg_lane_max_shift_px": "80.0",
+            "cfg_obs_roi_top": "0.30", "cfg_obs_roi_bottom": "0.90",
+            "cfg_obs_min_area": "400.0", "cfg_obs_mog2_var_threshold": "50.0",
+            "cfg_obs_mog2_learning_rate": "0.005", "cfg_obs_morph_kernel_size": "5",
+            "cfg_obs_min_confidence": "0.3", "cfg_obs_focal_length_px": "700.0",
+            "cfg_risk_ttc_warning_s": "3.0", "cfg_risk_ttc_brake_s": "1.5",
+            "cfg_risk_max_ttc_s": "10.0", "cfg_risk_max_distance_m": "40.0",
+            "cfg_risk_proximity_weight": "0.35", "cfg_risk_ttc_weight": "0.50",
+            "cfg_risk_lateral_weight": "0.15",
+            "cfg_dec_warn_score_threshold": "0.35", "cfg_dec_brake_score_threshold": "0.65",
+            "cfg_dec_ttc_warn_s": "3.0", "cfg_dec_ttc_brake_s": "1.5",
+        }
+        for tag, val in defaults.items():
+            if dpg.does_item_exist(tag):
+                dpg.set_value(tag, val)
+        self._cfg_log("All parameters reset to defaults.", (200, 200, 200))
+
+    # ------------------------------------------------------------------
+    # Configurator Docker process management
+    # ------------------------------------------------------------------
+
+    def _start_configurator(self, cat: int, vid: int) -> None:
+        if self._cfg_running:
+            self._cfg_log("Configurator already running.", (255, 200, 120))
+            return
+
+        os.makedirs(self._cfg_stream_dir, exist_ok=True)
+        # Persist current configurator params so Docker picks them up
+        self._cfg_save_all()
+
+        cmd = self._docker_exec_cmd([
+            "python", "scripts/run_scenario.py",
+            "--category-id", str(cat),
+            "--video-id", str(vid),
+            "--ui-backend", "none",
+            "--target-fps", "15",
+            "--stream-dir", "data/processed/configurator_stream",
+            "--loop",
+            "--log-every", "30",
+            "--no-audio",
+            "--context-interval", dpg.get_value("ctx_interval").strip() or "5",
+        ])
+
+        self._cfg_log(f"$ {' '.join(cmd)}", (140, 200, 255))
+
+        kwargs: Dict[str, Any] = dict(
+            cwd=self.project_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if os.name != "nt":
+            kwargs["preexec_fn"] = os.setsid
+        else:
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
+        try:
+            proc = subprocess.Popen(cmd, **kwargs)
+        except Exception as exc:
+            self._cfg_log(f"[spawn error] {exc}", (255, 130, 130))
+            return
+
+        self._cfg_proc = proc
+        self._cfg_running = True
+        self._cfg_latest_mtime = 0.0
+
+        def _reader() -> None:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                text, col = self._ansi_to_colored_text(line.rstrip("\n"))
+                self._cfg_queue.put((text, col))
+            proc.stdout.close()
+
+        t = threading.Thread(target=_reader, daemon=True)
+        self._cfg_thread = t
+        t.start()
+
+    def _stop_configurator(self) -> None:
+        if not self._cfg_running or self._cfg_proc is None:
+            return
+        proc = self._cfg_proc
+        try:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+            else:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except Exception:
+            pass
+
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        if proc.poll() is None:
+            try:
+                if os.name == "nt":
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+                else:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                pass
+
+        self._run_short_command(["docker", "compose", "exec", "-T", self.service_name, "pkill", "-f", "scripts/run_scenario.py"])
+        self._cfg_running = False
+        self._cfg_proc = None
+        self._cfg_log("[configurator] stopped", (255, 210, 120))
+
+    def _restart_configurator(self) -> None:
+        sel = self._ensure_selected()
+        if sel is None:
+            return
+        cat, vid = sel
+        self._stop_configurator()
+        self._start_configurator(cat, vid)
+
+    def _on_configurator_close(self) -> None:
+        self._stop_configurator()
+
+    def _drain_configurator_output(self) -> None:
+        drained = 0
+        while drained < 100:
+            try:
+                line, col = self._cfg_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._cfg_lines.append((line, col))
+            if len(self._cfg_lines) > 2000:
+                self._cfg_lines = self._cfg_lines[-1500:]
+                if dpg.does_item_exist("cfg_log_group"):
+                    dpg.delete_item("cfg_log_group", children_only=True)
+                    for txt, c in self._cfg_lines:
+                        dpg.add_text(txt, parent="cfg_log_group", color=c)
+            else:
+                if dpg.does_item_exist("cfg_log_group"):
+                    dpg.add_text(line, parent="cfg_log_group", color=col)
+            if dpg.does_item_exist("cfg_log_child"):
+                y_max = dpg.get_y_scroll_max("cfg_log_child")
+                dpg.set_y_scroll("cfg_log_child", y_max)
+            drained += 1
+
+    def _poll_configurator_end(self) -> None:
+        if not self._cfg_running or self._cfg_proc is None:
+            return
+        code = self._cfg_proc.poll()
+        if code is None:
+            return
+        if self._cfg_thread is not None:
+            self._cfg_thread.join(timeout=2.0)
+        while True:
+            try:
+                line, col = self._cfg_queue.get_nowait()
+                self._cfg_lines.append((line, col))
+                if dpg.does_item_exist("cfg_log_group"):
+                    dpg.add_text(line, parent="cfg_log_group", color=col)
+            except queue.Empty:
+                break
+        self._cfg_running = False
+        status_col = (120, 255, 120) if code == 0 else (255, 130, 130)
+        self._cfg_log(f"[exit] return code: {code}", status_col)
+
+    def _render_configurator_frame(self) -> None:
+        """Read latest.jpg from the stream dir and upload to the DPG texture."""
+        if not self._cfg_running:
+            return
+        if not dpg.does_item_exist(self._cfg_texture_tag):
+            return
+        latest_path = os.path.join(self._cfg_stream_dir, "latest.jpg")
+        status_path = os.path.join(self._cfg_stream_dir, "status.json")
+        try:
+            mtime = os.path.getmtime(latest_path)
+        except OSError:
+            return
+        if mtime <= self._cfg_latest_mtime:
+            return
+        self._cfg_latest_mtime = mtime
+
+        try:
+            img = Image.open(latest_path)
+            img = img.convert("RGBA")
+            img = img.resize((self._cfg_frame_w, self._cfg_frame_h), Image.LANCZOS)
+            raw = np.array(img, dtype=np.float32) / 255.0
+            dpg.set_value(self._cfg_texture_tag, raw.flatten().tolist())
+        except Exception:
+            pass
+
+        # Update status text
+        try:
+            with open(status_path, "r") as fh:
+                st = json.load(fh)
+            text = f"Frame {st.get('frame_idx', '?')}/{st.get('total_frames', '?')}  |  action={st.get('action', '?')}  |  iter={st.get('iteration', 0)}"
+            if dpg.does_item_exist("cfg_status_text"):
+                dpg.set_value("cfg_status_text", text)
+                color = (120, 255, 120) if st.get("action") == "none" else (255, 200, 100)
+                dpg.configure_item("cfg_status_text", color=color)
+            # Update slider range and position
+            total = st.get("total_frames", 1)
+            fidx = st.get("frame_idx", 0)
+            if dpg.does_item_exist("cfg_frame_slider"):
+                dpg.configure_item("cfg_frame_slider", max_value=max(1, total - 1))
+                self._cfg_suppress_slider = True
+                dpg.set_value("cfg_frame_slider", fidx)
+                self._cfg_suppress_slider = False
+        except Exception:
+            pass
+
+    def _cfg_log(self, line: str, color: Tuple[int, int, int] = (220, 220, 220)) -> None:
+        self._cfg_queue.put((line, color))
+
+    def _cfg_clear_log(self) -> None:
+        self._cfg_lines.clear()
+        if dpg.does_item_exist("cfg_log_group"):
+            dpg.delete_item("cfg_log_group", children_only=True)
+
+    def _cfg_copy_log(self) -> None:
+        tail = self._cfg_lines[-100:]
+        text = "\n".join(t for t, _ in tail)
+        try:
+            dpg.set_clipboard_text(text)
+            self._cfg_log("[info] Copied last 100 log lines to clipboard.", (160, 220, 255))
+        except Exception:
+            self._cfg_log("[warn] Clipboard not available.", (255, 200, 100))
+
+    def _cfg_write_control(self, cmd: str, target: Optional[int] = None) -> None:
+        """Write a control command to the stream directory for Docker to read."""
+        ctrl_path = os.path.join(self._cfg_stream_dir, "control.json")
+        try:
+            os.makedirs(self._cfg_stream_dir, exist_ok=True)
+            payload: Dict[str, Any] = {"command": cmd}
+            if target is not None:
+                payload["target"] = target
+            with open(ctrl_path, "w") as fh:
+                json.dump(payload, fh)
+        except Exception:
+            pass
+
+    def _cfg_toggle_pause(self) -> None:
+        self._cfg_paused = not self._cfg_paused
+        if self._cfg_paused:
+            self._cfg_write_control("pause")
+            if dpg.does_item_exist("cfg_pause_btn"):
+                dpg.set_item_label("cfg_pause_btn", "Play")
+            self._cfg_log("[control] paused", (255, 230, 120))
+        else:
+            self._cfg_write_control("play")
+            if dpg.does_item_exist("cfg_pause_btn"):
+                dpg.set_item_label("cfg_pause_btn", "Pause")
+            self._cfg_log("[control] resumed", (120, 255, 120))
+
+    def _cfg_prev_frame(self) -> None:
+        self._cfg_write_control("prev")
+        self._cfg_paused = True
+        if dpg.does_item_exist("cfg_pause_btn"):
+            dpg.set_item_label("cfg_pause_btn", "Play")
+
+    def _cfg_next_frame(self) -> None:
+        self._cfg_write_control("next")
+        self._cfg_paused = True
+        if dpg.does_item_exist("cfg_pause_btn"):
+            dpg.set_item_label("cfg_pause_btn", "Play")
+
+    def _cfg_first_frame(self) -> None:
+        self._cfg_write_control("seek", target=0)
+        self._cfg_paused = True
+        if dpg.does_item_exist("cfg_pause_btn"):
+            dpg.set_item_label("cfg_pause_btn", "Play")
+
+    def _cfg_last_frame(self) -> None:
+        self._cfg_write_control("seek", target=-1)
+        self._cfg_paused = True
+        if dpg.does_item_exist("cfg_pause_btn"):
+            dpg.set_item_label("cfg_pause_btn", "Play")
+
+    def _cfg_on_slider_changed(self, sender: Any, value: int) -> None:
+        if self._cfg_suppress_slider:
+            return
+        self._cfg_write_control("seek", target=int(value))
+        self._cfg_paused = True
+        if dpg.does_item_exist("cfg_pause_btn"):
+            dpg.set_item_label("cfg_pause_btn", "Play")
 
     def _build_process_overlay(self) -> None:
         with dpg.window(
@@ -1555,6 +2223,10 @@ class MasterDashboard:
             dpg.set_value("selected_video_label", f"category_id={cat}, video_id={vid}, record_id={row.get('record_id')}")
             dpg.set_value("run_scenario_category", f"category_id: {cat}")
             dpg.set_value("run_scenario_video", f"video_id: {vid}")
+            if dpg.does_item_exist("cfg_launcher_category"):
+                dpg.set_value("cfg_launcher_category", f"category_id: {cat}")
+            if dpg.does_item_exist("cfg_launcher_video"):
+                dpg.set_value("cfg_launcher_video", f"video_id: {vid}")
         except Exception:
             pass
         self._render_table()
