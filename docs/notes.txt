@@ -188,3 +188,127 @@ src/adas/context/
 - “lane availability” + “confidence”
 - “unmarked road fallback”
 - “friction coefficient μ” i utjecaj na kočenje
+
+
+9) IMPLEMENTATION SNAPSHOT (usklađeno sa source kodom, 2026-06-01)
+-------------------------------------------------------------------
+
+Sažetak što je stvarno implementirano (za tekst rada):
+- End-to-end orchestracija: src/adas/scenario/runner.py:26 (run_scenario).
+- Asinkrona kontekstna analiza: src/adas/context/service.py:32 (ContextService).
+- Router i histereza moda: src/adas/context/router.py:73 i src/adas/context/router.py:102.
+- Lane detekcija (stateful processor): src/adas/lane_detection/processing.py:172 i :242.
+- Degraded preprocessing (CLAHE/bilateral + prilagodbe):
+  src/adas/lane_detection/processing.py:457.
+- Obstacle detekcija + context-adaptive parametri:
+  src/adas/obstacle_detection/detector.py:101 i :175.
+- Procjena udaljenosti prepreke (perspektivna aproksimacija preko visine bbox-a):
+  src/adas/obstacle_detection/detector.py:354.
+- Risk estimator (TTC + score): src/adas/collision_risk/estimator.py:87.
+- Decision sloj (WARN/BRAKE + road penalty): src/adas/collision_risk/decision.py:62.
+- Vizualni overlayi: src/adas/ui/overlays.py:13, :52, :106.
+- Stats panel: src/adas/ui/dashboard.py:32.
+- Audio upozorenja: src/adas/ui/audio.py:27 i :47.
+- Master dashboard ulaz: main.py:12, implementacija panela:
+  src/adas/ui/master_panel.py:2649.
+
+Važna napomena za tekst rada:
+- Modul src/adas/lane_detection/hough.py je placeholder (nije aktivni put detekcije).
+  Lane-availability heuristika je u src/adas/context/lane_heuristic.py:27.
+
+
+10) TOČNE DEFAULT POSTAVKE KOJE TREBA NAVESTI U DOKUMENTACIJI
+--------------------------------------------------------------
+
+Kontekst (context/defaults):
+- t_vis = 0.5 -> src/adas/context/defaults.py:18
+- t_lane_low = 0.10 -> src/adas/context/defaults.py:122
+- hysteresis_k = 5 -> src/adas/context/defaults.py:126
+- braking multipliers (dry/wet/gravel/unknown) ->
+  src/adas/context/defaults.py:135-138
+
+Decision pragovi:
+- warn_score_threshold = 0.35 -> src/adas/collision_risk/decision.py:47
+- brake_score_threshold = 0.65 -> src/adas/collision_risk/decision.py:48
+- ttc_warn_s = 3.0 -> src/adas/collision_risk/decision.py:49
+- ttc_brake_s = 1.5 -> src/adas/collision_risk/decision.py:50
+- road_penalty_warn = 0.08 -> src/adas/collision_risk/decision.py:51
+
+Risk estimator:
+- ttc_warning_s = 3.0, ttc_brake_s = 1.5 ->
+  src/adas/collision_risk/estimator.py:68-69
+- max_distance_m = 40.0 -> src/adas/collision_risk/estimator.py:71
+- težine skora (proximity/ttc/lateral) ->
+  src/adas/collision_risk/estimator.py:72-74
+
+Obstacle detector:
+- roi_top = 0.30, roi_bottom = 0.90 -> src/adas/obstacle_detection/detector.py:78-79
+- min_area = 400 -> src/adas/obstacle_detection/detector.py:80
+- mog2_var_threshold = 50.0 -> src/adas/obstacle_detection/detector.py:85
+- focal_length_px = 700.0, assumed_object_height_m = 1.5 ->
+  src/adas/obstacle_detection/detector.py:90-91
+
+
+11) RAZLIKE U ODNOSU NA POČETNI DIZAJN (objasniti u radu kao odluke)
+--------------------------------------------------------------------
+
+- Udaljenost prepreke nije primarno mjerena preko lane-width kalibracije,
+  nego preko heuristike visine objekta i žarišne duljine:
+  src/adas/obstacle_detection/detector.py:354.
+
+- Emergency mode je podržan kroz context router override (EmergencySignal),
+  ali u glavnom flowu često je važnija kombinacija risk + decision sloja.
+  Referenca: src/adas/context/router.py:244 i src/adas/collision_risk/decision.py:62.
+
+- Dio lane-aware logike je namjerno podijeljen:
+  lane existence heuristika u context paketu, geometrija trake u lane_detection paketu.
+  Reference: src/adas/context/lane_heuristic.py:27, src/adas/lane_detection/processing.py:242.
+
+
+12) SKRIPTE KOJE TREBA NAVESTI U POGLAVLJU "IMPLEMENTACIJA"
+------------------------------------------------------------
+
+- Glavni scenario CLI: scripts/run_scenario.py
+  - parser argumenata: scripts/run_scenario.py:31
+  - normal mode: scripts/run_scenario.py:421
+  - streaming mode za konfigurator (latest.jpg + status.json):
+    scripts/run_scenario.py:57
+
+- Debug lane pipeline: scripts/debug_lanes.py:99 (main)
+- Debug obstacle pipeline: scripts/debug_obstacles.py:98 (main)
+- Kontekstna analiza videa (tablica/GUI): scripts/context/analyze_video.py:960 (main)
+
+
+13) TEST REFERENCE (za poglavlje "Testiranje")
+-----------------------------------------------
+
+- Router decision + histereza:
+  tests/context/test_router.py:24, :106, :123
+- Lane processing:
+  tests/lane_detection/test_processing.py:55
+- Obstacle detector + tracker:
+  tests/obstacle_detection/test_detector.py:57, :132
+- Risk estimator:
+  tests/collision_risk/test_estimator.py:104
+- Decision logic:
+  tests/collision_risk/test_decision.py:33
+- Scenario run (dry run):
+  tests/scenario/test_runner.py:115
+- UI overlayi:
+  tests/ui/test_overlays.py:21, :52
+
+
+14) PREPORUKA ZA PISANJE POGLAVLJA (main.tex / chapters)
+--------------------------------------------------------
+
+Preporučena struktura narativa:
+- "Context-aware routing": prvo objasniti scene metrics i visibility,
+  zatim lane_state, pa mode switching + histerezu.
+- "Perception": lane detection i obstacle detection kao odvojene faze,
+  s naglaskom na context-adaptive parametre.
+- "Risk and action": TTC/risk_score pa decision thresholds i road penalty.
+- "UI and tooling": dashboard, player backends, debug skripte, streaming mode.
+- "Validation": mapirati svaku fazu na postojeće test fajlove i metrike.
+
+Time se direktno povezuju implementacija i teorijski dio rada, bez rupe između
+planiranog dizajna i stvarnog ponašanja koda.

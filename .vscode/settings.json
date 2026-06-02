@@ -1,0 +1,84 @@
+{
+    "files.autoSave": "afterDelay",
+    "files.autoSaveDelay": 800,
+    "latex-workshop.latex.autoBuild.run": "onSave",
+    "latex-workshop.latex.watch.usePolling": true,
+    "latex-workshop.latex.watch.pdf.delay": 200,
+    "latex-workshop.latex.autoBuild.interval": 500,
+    "latex-workshop.synctex.afterBuild.enabled": false,
+    "latex-workshop.view.pdf.viewer": "tab",
+    "latex-workshop.view.pdf.reload.transition": "none",
+    "latex-workshop.latex.recipes": [
+        {
+            "name": "latexmk (pdf)",
+            "tools": [
+                "latexmk"
+            ]
+        }
+    ],
+    "latex-workshop.latex.tools": [
+        {
+            "name": "latexmk",
+            "command": "latexmk",
+            "args": [
+                "-synctex=1",
+                "-interaction=nonstopmode",
+                "-file-line-error",
+                "-pdf",
+                "%DOC%"
+            ]
+        }
+    ],
+    "[latex]": {
+        "editor.wordWrap": "on",
+        "editor.wrappingIndent": "same"
+    },
+    "cSpell.enabled": true,
+    "cSpell.language": "hr,en",
+    "cSpell.enabledLanguageIds": [
+        "latex",
+        "markdown",
+        "plaintext"
+    ],
+    "cSpell.diagnosticLevel": "Information",
+    "cSpell.allowCompoundWords": true,
+    "cSpell.userWords": [
+        "ADAS",
+        "dashcam",
+        "histereza",
+        "lane",
+        "latencija",
+        "rubovi",
+        "trake"
+    ],
+    "ltex.enabled": [
+        "latex",
+        "markdown",
+        "plaintext"
+    ],
+    "ltex.language": "hr-HR",
+    "ltex.diagnosticSeverity": "information",
+    "ltex.latex.enabled": true,
+    "ltex.dictionary": {
+        "hr-HR": [
+            "ADAS",
+            "ABS",
+            "ESC",
+            "FCW",
+            "AEB",
+            "LDW",
+            "LKA",
+            "ACC",
+            "TSR",
+            "dashcam"
+        ]
+    },
+    "cSpell.words": [
+        "ažurirajućem",
+        "histereze",
+        "konvolucije",
+        "konvolucijskih",
+        "konvoluciju",
+        "skalabilnim"
+    ]
+}

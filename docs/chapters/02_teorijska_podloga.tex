@@ -1,48 +1,221 @@
+% !TeX root = ../main.tex
 \chapter{Teorijska podloga}
 
+Svrha ovog poglavlja je dati teorijski okvir za kasnija poglavlja.
+ADAS sustavi su se razvijali postupno, od ranih sustava poput ABS-a(\textit{Anti-lock Braking System}) i ESC-a (\textit{Electronic Stability Control}), preko prvih kamera i radarskih asistencija (adaptivni tempomat i upozorenje na napuštanje trake) pa sve do današnjih sustava koji u realnom vremenu spajaju detekciju traka, objekata na cesti i procjenu rizika sudara. U Europskoj uniji ključan je zakonodavni okvir Uredba (EU) 2019/2144 (\textit{General Safety Regulation})\supercite{eu2019_2144} koja je od 2022. obvezna za nove tipove vozila, a od 2024. za sva nova vozila na tržištu EU. U praksi to znači da su proizvođači obvezni ugraditi neke minimalne sigurnosne funkcije u automobile.
+
+Bitno je razlikovati kako ADAS asistencija vozačima ne podrazumijeva punu autonomiju sustava da dugoročno upravlja vozilom\supercite{saej3016}.
+Teorijska podloga u ovom poglavlju bitna je kako bi daljnje objašnjavanje implementacije i ostalih poglavlja bio jasniji.
+
 \section{ADAS sustavi}
-Sustavi asistencije vozaču (ADAS) skup su tehnologija koje pomažu vozaču u upravljanju vozilom povećavajući sigurnost i udobnost vožnje. ADAS sustavi koriste različite senzore poput kamera, radara, lidara i ultrazvučnih senzora kako bi prikupili informacije o okolini vozila. Na temelju tih informacija sustav može upozoriti vozača ili autonomno reagirati.
+ADAS ili \textit{Advanced Driver Assistance Systems} je skup sustava koji pomažu vozaču tako da opažaju okolinu vozila, procjenjuju rizik i upozoravaju ili kratko interveniraju.
+O ovakvom sustavu možemo razmišljati kao o stalno ažurirajućem \textit{pipeline-u} u nekoliko faza:
+\begin{itemize}
+    \item senzorska faza: kamera, radar, ponekad LiDAR/ultrazvuk senzori skupljaju podatke
+    \item percepcija: algoritam prepoznaje trake, vozila, pješake, znakove
+    \item procjena: računa se udaljenost, relativna brzina, vrijeme do sudara, razmak
+    \item odluka: sustav odlučuje treba li samo upozoriti ili potencijalno intervenirati
+    \item akcija: zvučno/vizualno upozorenje, korekcija volana, gas/kočnica
+\end{itemize}
 
-Moderni ADAS sustavi obuhvaćaju širok spektar funkcionalnosti: od sustava za upozorenje na napuštanje trake (LDW), adaptivnog tempomata (ACC), automatskog kočenja u nuždi (AEB), pa sve do kompleksnih sustava za autonomnu vožnju višeg stupnja. Prema klasifikaciji SAE International, razine autonomije vozila dijele se u pet stupnjeva, od L0 (bez automatizacije) do L5 (potpuna autonomija). Većina trenutno dostupnih komercijalnih ADAS sustava funkcionira na razinama L1 i L2.
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\linewidth,height=0.45\textheight,keepaspectratio]{ADAS-dijagram.png}
+    \caption{Osnovni tok rada ADAS sustava.}
+    \label{fig:adas_pipeline}
+\end{figure}
 
-Zakonodavni okvir Europske unije sve strože nalaže ugradnju ADAS sustava u nova vozila. Od 2022. godine obavezna je ugradnja sustava za upozorenje na napuštanje trake, automatsko kočenje u nuždi te detekciju umora vozača. Ova regulatorna inicijativa ubrzala je razvoj i implementaciju navedenih tehnologija.
+ADAS obuhvaća više podsustava:
+\begin{itemize}
+    \item LDW \textit{Lane Departure Warning} upozorenje ako vozilo nenamjerno izlazi iz trake
+    \item LKA \textit{Lane Keeping Assist} aktivna pomoć upravljanjem, osim što upozorava može također dati mali moment na volan kako bi se vozilo vratilo u sredinu trake
+    \item ACC \textit{Adaptive Cruise Control}
+    \item FCW \textit{Forward Collision Warning} upozorenje na moguć frontalni sudar
+    \item AEB \textit{Automatic Emergency Braking} automatsko kočenje u nuždi
+    \item BSD/BSM \textit{Blind Spot Detection/Monitoring} upozorenje na vozilo u mrtvom kutu
+    \item TSR \textit{Traffic Sign Recognition} prepoznavanje prometnih znakova, najčešće ograničenja brzine
+\end{itemize}
+Kroz ovaj rad fokus je stavljen na FCW te AEB. Sustav je zamišljen takav da za ulaz ima samo prednju kameru (\textit{dashcam}) preko koje prati promet ispred vozila, međutim ostavljena je mogućnost dodavanja i drugih ulaza podataka.
 
-\section{Računalni vid u automobilskim primjenama}
-Računalni vid grana je umjetne inteligencije koja se bavi obradom i razumijevanjem digitalnih slika i videozapisa. U kontekstu ADAS sustava, računalni vid omogućuje detekciju prometnih traka, prepreka, prometnih znakova i pješaka u stvarnom vremenu.
-
-Ključni izazovi računalnog vida u automobilskim primjenama uključuju robusnost na različite uvjete osvjetljenja, promjene vremenskih uvjeta te potrebu za obradom u stvarnom vremenu uz minimalna kašnjenja. Dodatni izazov predstavlja potreba za visokom pouzdanošću sustava s obzirom na sigurnosno kritičnu prirodu primjene.
-
-Postoje dva osnovna pristupa računalnom vidu u ADAS sustavima: klasični deterministički pristup temeljen na matematičkim operacijama obrade slike te moderni pristup temeljen na dubokom učenju. Svaki od njih nosi svoje prednosti i nedostatke ovisno o uvjetima primjene.
+\section{Računalni vid u prometnim aplikacijama}
+Računalni vid u kontekstu vozila je način da sustav iz video okvira procjeni što se događa ispred vozila. Nije cilj samo prepoznati objekte nego razumjeti prometnu scenu dovoljno dobro za sigurnu odluku.
+Odluka da jedna kamera predstavlja jedini izvor podataka čini ovaj sustav jeftinim, skalabilnim ali i osjetljivim na uvjete scene.
+U kontekstu ovog rada algoritam računalnog vida rješava probleme detekcije trake, prepreka te razumijeva scenu (vidljivost, vremenske uvjete, postojanost traka i slično).
+Glavne izazove u ovom modelu predstavljaju uvjeti u stvarnom prometu, a specifično so tu:
+\begin{itemize}
+    \item varijacije osvjetljenja (noć, tuneli, odsjaj)
+    \item atmosferski utjecaji (kiša, magla, mokra cesta)
+    \item vizualni problemi (sjene, motion blur)
+\end{itemize}
+kao posljedicu možemo dobiti dobro ponašanje u laboratorijskim uvjetima ali nestabilno na cesti.
+Osim što sustav mora kvalitetno obraditi sliku mora i to napraviti u primjerenom vremenskom okviru te konzistentno kroz vrijeme. Zato u implementaciju uvodimo ideje poput zaglađivanja, histereze te praćenje kroz više frameova kako bi se manje opteretio procesor.
+Zapravo, važan je fini balans između točnosti, latencije i robusnosti. Ako imamo vrijeme obrade $\Delta t$ tada očekujemo brzinu obrade od $$FPS \approx \frac{1}{\Delta t}$$
+Kroz projekt ciljamo na minimalnu brzinu od 30FPS.
 
 \subsection{Klasični pristup}
-Klasični pristup koristi deterministički niz operacija kao što su filtriranje, detekcija rubova i transformacija perspektive. Prednosti su predvidljivost, interpretabilnost i niski računalni zahtjevi. Nedostaci su osjetljivost na promjene u uvjetima osvjetljenja i složenost ručnog podešavanja parametara.
+U klasičnoj obradi slike, početni korak obično obuhvaća uklanjanje visokofrekventnog šuma, što se matematički provodi postupkom diskretne dvodimenzionalne konvolucije. Umjesto ručnog definiranja matrica i računanja konvolucijskih integrala, u praksi se koriste optimizirane funkcije ugrađene u Python biblioteke (poput OpenCV-a koji i koristimo). Jedan od najučinkovitijih načina za izvođenje ovog koraka upravo je primjena Gaussove jezgre; on djeluje kao niskopropusni filtar koji zaglađuje sliku, čime se uklanja šum i priprema čist signal za daljnje faze obrade, poput detekcije rubova ili segmentacije.
+Nakon što je otklonjena većina šuma algoritam dalje detektira rubove na slici.
+Rub možemo definirati kao mjesto velike promjene intenziteta. Ako izračunamo gradijent na slici i filtriramo mjesta na slici čiji je intenzitet veći od neke konstante, piksel postaje kandidat ruba. U Canny pristupu\supercite{canny1986} postoje dva praga, \(T_{\text{high}}\) i \(T_{\text{low}}\), te postupak histereze koji funkcionira na sljedeći način \--- jaki rubovi ostaju ako vrijedi \(\vert{}\nabla I\vert{} > T_{\text{high}}\), a slabi rubovi za koje vrijedi \(T_{\text{low}} \le \vert{}\nabla I\vert{} \le T_{\text{high}}\) ostaju jedino ako su spojeni s jakim rubovima. Time dobivamo stabilnu mapu rubova.
+
+Dalje, umjesto da algoritam detektira rubove po cijeloj površini slike, fokus se stavlja isključivo na regiju od interesa (\textit{Region of Interest \--- ROI}) gdje se očekuje pozicija prometne trake. To je najčešće donja polovica i središnji dio slike. Time se značajno smanjuje broj piksela koji ulaze u analizu te se izbjegava lažna detekcija rubova zgrada, neba ili drugih objekata.
+
+Iz rubnih točaka dalje radimo geometrijsku interpretaciju linija. Cilj je procijeniti stvarnu geometriju trake na temelju skupa detektiranih piksela. U najjednostavnijem slučaju, traka se aproksimira pravcem
+\begin{equation}
+    y = mx + b
+\end{equation}
+a parametri pravca (nagib $m$ i odsječak $b$) dobivaju se metodom najmanjih kvadrata (engl. \textit{Least Squares} \--- LS) rješavanjem optimizacijskog problema.
+Ako je traka zakrivljena, geometrija se modelira pomoću polinoma drugog stupnja
+\begin{equation}
+    x(y) = ay^2 + by + c
+\end{equation}
+čiji se koeficijenti ponovo procjenjuju sa metodom najmanjih kvadrata.
+
+Važno je napometnuti kako ovaj klasični pristup radi dobro jedino kada su parametri dobro postavljeni, međutim nekad je problematična točka što su za različite uvjete na cesti potrebne različite vrijednosti istih parametara i tu nastupa kontekstna analiza scene o kojoj ćemo kasnije.
 
 \subsection{Pristup dubokim učenjem}
-Modeli dubokog učenja poput YOLO i SSD arhitektura nude visoku točnost detekcije u raznolikim uvjetima. Međutim, zahtijevaju velike količine anotiranih podataka za treniranje te značajne računalne resurse za izvođenje u stvarnom vremenu.
+Pristupi dubokog učenja uglavnom su korišteni jer povezuju značajke slike sa donošenjem odluke, tj. ta dva procesa nisu odvojena. Zbog toga su popularni u prepoznavanju objekata, prometnih traka, gdje klasične metode često gube robusnost pri jakim promjenama osvjetljenja, sjeni ili složenoj pozadini. U praksi, jednom istreniran model može bolje reagirati na nove, nepredviđene uvjete od klasičnog pristupa koji se oslanja na ručno parametrizirane modele.
 
-\section{Klasična obrada slike}
-Za razliku od metoda temeljenih na dubokom učenju, klasična obrada slike koristi deterministički pristup temeljen na matematičkim operacijama. Prednosti ovog pristupa su predvidljivost, interpretabilnost i niži računalni zahtjevi.
+S druge strane, ovakav pristup zahtijeva velike količine anotiranih podataka, vrijeme treniranja i jače računalne resurse (koji uglavnom niti nisu problem u industriji). Održavanje je također kompliciranije jer svaka veća promjena senzora ili drugog ulaza uglavnom povlači za sobom dodatnu prilagodbu ili čak ponovno treniranje.
 
-U ovom radu koriste se sljedeće metode klasične obrade slike:
-\begin{itemize}
-    \item \textbf{Gaussovo filtriranje} — uklanjanje šuma iz slike
-    \item \textbf{Cannyjeva detekcija rubova} — detekcija granica objekata
-    \item \textbf{Houghova transformacija} — detekcija pravaca i krivulja
-    \item \textbf{Transformacija perspektive} — pretvorba u pogled odozgo (engl. \textit{bird's eye view})
-\end{itemize}
+\begin{table}[H]
+    \centering
+    \caption{Sažeta usporedba klasičnog i dubokog pristupa.}
+    \label{tab:classic-vs-dl}
+    \begin{tabular}{|l|l|l|}
+        \hline
+        Kriterij                      & Klasični pristup       & Duboko učenje                 \\
+        \hline
+        Objašnjivost                  & Visoka (jasna pravila) & Niža (teže interpretirati)    \\
+        \hline
+        Računalni resursi             & Manji                  & Veći (osobito pri treniranju) \\
+        \hline
+        Potreba za podatcima          & Niska do srednja       & Visoka (anotirani skupovi)    \\
+        \hline
+        Robusnost na kompleksne scene & Ograničena             & U pravilu bolja               \\
+        \hline
+    \end{tabular}
+\end{table}
 
-\section{Kinematički model vozila}
-Kinematički model vozila matematički opisuje gibanje vozila bez razmatranja sila koje uzrokuju to gibanje. U kontekstu ovog rada, kinematički model koristi se za procjenu putanje vozila i predviđanje potencijalnih sudara.
+\section{Osnove obrade slike}
+U obradi slike za prometne primjene najvažnije je najprije pripremiti ulaz tako da algoritam dobije što stabilniji prikaz scene. Slika se promatra kao skup piksela čije vrijednosti nose informaciju o svjetlini i boji, a u praksi se često koristi pojednostavljeni prikaz u sivim tonovima jer je računalno efikasnije analizirati samo jedan \textit{grayscale} kanal a ne tri zasebna kanala za boju.
 
-Najčešće korišten kinematički model u ADAS primjenama jest model bicikla (engl. \textit{bicycle model}), koji aproksimira četverokotačno vozilo kao jednoosovinski sustav. Ovaj model dovoljna je aproksimacija za scenarije pri nižim brzinama i manjim kutovima upravljača.
+Zatim slijedi uklanjanje šuma, najčešće blagim zaglađivanjem, kao što je već objašnjeno, kako bi se smanjile slučajne oscilacije koje kasnije stvaraju lažne rubove. Nakon toga se provodi detekcija rubova, pri čemu se izdvajaju granice objekata i prometnih oznaka, a rezultat se dodatno ograničava na regiju od interesa, odnosno dio slike u kojem se realno očekuju trake i prepreke. Takav redoslijed koraka omogućuje da sustav bude brži, stabilniji i otporniji na smetnje iz okoline, što je posebno važno za kasnije module detekcije traka i prepreka u stvarnim uvjetima vožnje.
 
-Ključni parametri kinematičkog modela su:
-\begin{itemize}
-    \item $v$ — brzina vozila
-    \item $\delta$ — kut upravljača
-    \item $L$ — međuosovinska udaljenost
-    \item $\beta$ — kut klizanja
-\end{itemize}
+\subsection{Vremenska stabilizacija rezultata}
+U sustavima koji obrađuju video u stvarnom vremenu čest je problem oscilacija rezultata između uzastopnih okvira, iako se scena objektivno nije bitno promijenila. Takvo ponašanje naziva se \textit{jitter} i može uzrokovati nestabilan prikaz traka, nagle promjene procjene pouzdanosti te nepotrebno prebacivanje između režima rada sustava. U praksi to smanjuje upotrebljivost izlaza jer vozač i viši moduli odlučivanja ne dobivaju konzistentnu informaciju kroz vrijeme.
 
-Na temelju tih parametara moguće je predvidjeti putanju vozila i izračunati tzv. \textit{time-to-collision} (TTC) metriku koja se koristi za procjenu rizika od sudara.
-Detekcija rubova može se formulirati kao optimizacijski problem \cite{canny1986}.
+Zbog toga se u obradi uvode metode vremenskog zaglađivanja, poput pomičnog prosjeka, eksponencijalnog pomičnog prosjeka (\textit{EMA}) i histereze pri donošenju odluka. Uzimanje prosječnih vrijednosti smanjuje utjecaj kratkotrajnih odstupanja, to dodatno daje veću težinu novijim mjerenjima, dok histereza sprječava prečesto prebacivanje stanja kada je signal blizu praga. Rezultat je stabilniji izlaz detekcije traka i pouzdanija osnova za procjenu rizika, posebno u uvjetima lošije vidljivosti, šuma i promjenjivog osvjetljenja.
+
+\section{Detekcija prepreka i praćenje objekata}
+Važno je objasniti razliku između detekcije i praćenja objekata. Dok detekcija objekata na slici odgovara na pitanje: \textit{što je na slici u ovom trenutku}, praćenje odgovara na pitanje \textit{je li to isti objekt kroz više uzastopnih slika i kako se kreće?}.
+
+U kontekstu vožnje, prepreka je svaki objekt koji može utjecati na sigurnost putanje vozila, to može biti drugo vozilo, pješak, biciklist, statična prepreka na traci ili nešto drugo. 
+% Ova sekcija treba objasniti teoriju obstacle detectiona i praćenja.
+% Predloži 3 odlomka.
+% Treba pokriti:
+% - što je obstacle detection u prometnoj sceni
+% - osnovni pristupi: foreground/background, konture, ROI filtriranje
+% - zašto je važno razlikovati detekciju od praćenja
+% - IoU kao ideja za povezivanje objekata kroz frameove
+%
+% Obavezno napomeni:
+% - objekte ne treba gledati samo kao trenutne detekcije nego kao vremenske tragove
+% - praćenje pomaže procjeni brzine približavanja
+%
+% Dobar vizualni dodatak:
+% - primjer bounding boxa na frameu
+% - mali primjer IoU preklapanja između dva framea
+
+\subsection{Osnovne geometrijske mjere}
+% Ovdje možeš površno objasniti:
+% - bounding box
+% - centroid
+% - površina objekta
+% - aspektni omjer
+% - udaljenost između objekata ili centara
+%
+% Ako želiš, ovdje je dobro objasniti zašto se neke detekcije filtriraju po veličini i obliku.
+
+\subsection{Praćenje objekata kroz vrijeme}
+% Ovdje objasni kako tracking koristi uzastopne frameove.
+% Treba pokriti:
+% - stabilni ID-jevi
+% - povezivanje detekcija po sličnosti / IoU
+% - osnovna ideja kratkoročnog praćenja
+% - zašto tracking olakšava procjenu relativne brzine
+%
+% Dovoljno je teorijski opisati, bez ulaska u kod.
+
+\section{Vrijeme do sudara i procjena rizika}
+% Ova sekcija je jedna od najvažnijih za rad.
+% Predloži 3-4 odlomka.
+% Treba pokriti:
+% - definicija TTC (time-to-collision)
+% - intuitivna interpretacija TTC-a
+% - veza između udaljenosti i relativne brzine
+% - zašto TTC nije uvijek dovoljno precizan, ali je vrlo koristan kao heuristika
+%
+% Matematički dio:
+% - osnovna formula TTC = udaljenost / relativna brzina
+% - što se događa kada je relativna brzina nula ili negativna
+% - ograničenja kad nemaš dubinu i točnu brzinu vozila
+%
+% Obavezno napomeni:
+% - u ovom radu TTC je dio šireg risk score sustava
+% - procjena rizika može uključivati i lateralnu poziciju objekta
+%
+% Preporučeni vizualni dodatak:
+% - dijagram približavanja objekta prema vozilu s označenim TTC
+
+\section{Kinematički model vozila i kočenje}
+% Ova sekcija treba objasniti dovoljno teorije da se opravda braking logic.
+% Predloži 3 odlomka.
+% Treba pokriti:
+% - što je kinematički model i po čemu se razlikuje od dinamičkog
+% - bicycle model kao standardna aproksimacija
+% - kako brzina i zakretanje utječu na putanju
+% - zaustavni put i reakcijski put kao koncepti
+%
+% Matematičke stvari koje vrijedi spomenuti:
+% - veza između brzine, udaljenosti i vremena
+% - ideja kočnog puta
+% - utjecaj koeficijenta trenja mu na zaustavljanje
+%
+% Obavezno napomeni:
+% - podloga i vremenski uvjeti mijenjaju efektivnu kočivost
+% - zbog toga je u radu koristan braking multiplier / korekcija prema podlozi
+%
+% Ako koristiš sliku:
+% - nacrtaj vozilo, putanju i zonu kočenja
+
+\section{Kontekstno usmjeravanje rada sustava}
+% Ova sekcija povezuje teoriju sa stvarnim scenarijima iz projekta.
+% Predloži 3 odlomka.
+% Treba pokriti:
+% - visibility estimation kao heuristička procjena kvalitete scene
+% - lane confidence kao mjera pouzdanosti traka
+% - road surface heuristika i zašto je korisna za kočenje
+% - režimi rada: marked / degraded / unmarked / emergency
+% - histereza kao način da se spriječi prečesto prebacivanje moda
+%
+% Ovdje možeš objasniti:
+% - zašto se parametri moraju prilagoditi scenama različite kvalitete
+% - zašto je bolje imati fallback ponašanje nego forsirati jednu strategiju
+%
+% Preporučeni vizualni dodatak:
+% - tablica ili state machine dijagram koji prikazuje prijelaze između modova
+
+\section{Metode evaluacije}
+% Ova završna sekcija treba objasniti kako se procjenjuje kvaliteta sustava.
+% Predloži 2-3 odlomka.
+% Treba pokriti:
+% - precision, recall, F1
+% - stabilnost moda / broj prebacivanja
+% - FPS kao mjera real-time performansi
+% - po potrebi AUC ili slične mjere za risk scoring
+%
+% Obavezno napomeni:
+% - nije dovoljno samo da sustav radi, nego i da je stabilan i dovoljno brz
+% - metričke mjere kasnije poveži s testnim poglavljem
+%
+% Ako želiš, ovdje se može ubaciti mala tablica sa svim metrikama i njihovim značenjem.

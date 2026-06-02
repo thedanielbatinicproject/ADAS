@@ -1,12 +1,42 @@
+% !TeX root = ../main.tex
 \chapter{Uvod}
 
-Ovaj rad bavi se primjenom računalnog vida u sustavima asistencije vozaču (ADAS).
+Moderni prometni sustavi sve više ovise o sustavima asistencije vozaču (ADAS), čiji je glavni cilj smanjiti učestalost prometnih nesreća i povećati sigurnost svih sudionika u prometu. U tom smislu, računalni vid predstavlja jednu od važnih tehnologija jer omogućuje analizu prometne scene iz izvora video zapisa (kamere) u stvarnom vremenu. S pomoću detekcije prometnih traka, prepoznavanja objekata i procjene rizika sudara, moguće je upozoriti vozača ili aktivirati automatsku reakciju sustava.
+
+Ovaj rad prikazuje razvoj i evoluciju jednog cjelovitog, determinističkog ADAS prototipa temeljenog na klasičnim metodama obrade slike. Sustav je napravljen tako da odvaja glavne korake u predikciji sudara: kontekstnu analizu scene (vidljivost, uvjeti na cesti), detekciju traka, detekciju i praćenje objekata, procjenu rizika sudara te donošenje odluke o upozorenju ili kočenju. Poseban naglasak je stavljen na robusnost sustava tako da isti može raditi za različite scenarije i uvjete.
 
 \section{Motivacija}
-Placeholder tekst.
+Iako su modeli dubokog učenja danas većinski zastupljeni u implementacijama sustava koji koriste neke oblike računalnog vida, njihova primjena često zahtijeva velike količine anotiranih podataka, snažan hardver i složeno održavanje modela. U inženjerskim i edukacijskim scenarijima nerijetko je korisno razviti sustav koji je brz, predvidljiv i računalno učinkovit. Upravo zbog toga motivacija ovog rada je izgraditi ADAS pipeline koji se može analizirati korak po korak, gdje je svaka odluka sustava povezana s mjerljivim parametrima i jasnim pravilima.
+
+Dodatna motivacija proizlazi iz potrebe da se sustav ponaša prilagodljivo ovisno o kontekstu scene. U stvarnim uvjetima vožnje kvaliteta slike, vidljivost traka i stanje podloge mogu se značajno mijenjati. Zbog toga je uveden kontekstno svjestan mehanizam usmjeravanja režima rada (scenario routing) koji dinamički prilagođava način detekcije i kriterije za procjenu rizika.
 
 \section{Ciljevi rada}
-Placeholder tekst.
+Glavni cilj rada je implementirati funkcionalan i modularan ADAS sustav za obradu slika video \textit{stream}-a prometne kamere, analizu scenarija te evaluirati ponašanje samog sustava kroz niz testnih slučajeva. Kako bi se taj cilj ostvario, definirani su sljedeći podciljevi:
+
+\begin{itemize}
+    \item projektirati arhitekturu sustava koja jasno odvaja kontekstnu analizu, percepciju, procjenu rizika i korisničko sučelje,
+    \item implementirati detekciju prometnih traka i prepreka klasičnim metodama obrade slike,
+    \item uvesti metriku rizika sudara (TTC i kombinirani \textit{risk score}) te pravila odlučivanja za akcije upozorenja i kočenja,
+    \item omogućiti kontekstno prilagođavanje parametara sustava (npr. degradirani uvjeti, slabije vidljive trake, mokra podloga),
+    \item izgraditi alate za pokretanje scenarija, debug prikaz i evaluaciju rezultata,
+    \item dokumentirati ograničenja i prednosti determinističkog pristupa u odnosu na složenije modele.
+\end{itemize}
+
+Uz navedeno, cilj je i osigurati da implementacija bude dovoljno pregledna za daljnja proširenja, primjerice zamjenu pojedinih modula naprednijim modelima ili integraciju dodatnih senzora.
 
 \section{Struktura rada}
-Placeholder tekst.
+Rad je organiziran u nekoliko logički povezanih poglavlja.
+
+U \textbf{2. poglavlju} prikazana je teorijska podloga: ADAS koncepti, osnove računalnog vida relevantne za detekciju traka i prepreka te kinematički aspekt procjene rizika.
+
+U \textbf{3. poglavlju} dan je pregled srodnih pristupa iz literature, s naglaskom na prednosti i ograničenja klasičnih metoda u odnosu na modernije pristupe temeljene na dubokom učenju.
+
+U \textbf{4. poglavlju} opisana je metodologija i arhitektura rješenja: način usmjeravanja rada prema kontekstu scene, tok obrade po modulima te ključni parametri i heuristike.
+
+U \textbf{5. poglavlju} detaljno je prikazana implementacija projekta, uključujući strukturu paketa, glavne skripte za pokretanje scenarija i ulogu pojedinih komponenti unutar sustava.
+
+U \textbf{6. poglavlju} prikazano je testiranje i analiza rezultata kroz funkcionalne i integracijske scenarije, uz raspravu o performansama, stabilnosti i pouzdanosti sustava.
+
+U \textbf{7. poglavlju} izneseni su zaključci rada, ograničenja postojećeg rješenja i prijedlozi za budući razvoj.
+
+Takva struktura omogućuje postupni prijelaz od teorijskih osnova prema praktičnoj implementaciji i evaluaciji, što olakšava praćenje razvoja cjelokupnog sustava od ideje do izvedbe.
