@@ -1,0 +1,19 @@
+\babel@toc {croatian}{}\relax 
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\contentsline {figure}{\numberline {2.1}{\ignorespaces Osnovni tok rada ADAS sustava.}}{4}{figure.2.1}%
+\contentsline {figure}{\numberline {2.2}{\ignorespaces Dijagram stanja kontekstnog usmjeravanja ADAS sustava s četiri radna režima i stanjem \textit {emergency\_override}.}}{12}{figure.2.2}%
+\addvspace {10\p@ }
+\contentsline {figure}{\numberline {3.1}{\ignorespaces Kategorije incidenata u skupu DADA-2000.\blx@tocontentsinit {0}\supercite {dada2000github}}}{14}{figure.3.1}%
+\addvspace {10\p@ }
+\contentsline {figure}{\numberline {4.1}{\ignorespaces Dretveni model izvršavanja sustava: glavna petlja obrade okvira i pozadinska kontekstna analiza}}{17}{figure.4.1}%
+\addvspace {10\p@ }
+\contentsline {figure}{\numberline {5.1}{\ignorespaces Prikaz GitHub Actions CI/CD \textit {pipeline-a} s koracima provjere koda i testiranja.}}{24}{figure.5.1}%
+\contentsline {figure}{\numberline {5.2}{\ignorespaces Struktura paketa projekta unutar direktorija \texttt {src/adas/}.}}{24}{figure.5.2}%
+\contentsline {figure}{\numberline {5.3}{\ignorespaces Glavni upravljački panel (\textit {Master Dashboard}) s tablicom zapisa dataseta.}}{33}{figure.5.3}%
+\contentsline {figure}{\numberline {5.4}{\ignorespaces Filtriranje i sortiranje tablice zapisa prema atributima anotacija.}}{33}{figure.5.4}%
+\contentsline {figure}{\numberline {5.5}{\ignorespaces Kartica za pokretanje scenarija s odabranim parametrima i prikazom loga.}}{34}{figure.5.5}%
+\contentsline {figure}{\numberline {5.6}{\ignorespaces Kartica Configurator s live pregledom okvira i numeričkim statusom sustava.}}{35}{figure.5.6}%
+\contentsline {figure}{\numberline {5.7}{\ignorespaces Kartica Runtime Overrides za podešavanje parametara sustava bez ponovnog pokretanja.}}{36}{figure.5.7}%
+\addvspace {10\p@ }
+\addvspace {10\p@ }

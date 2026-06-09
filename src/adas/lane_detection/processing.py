@@ -35,10 +35,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple, List
-
 import numpy as np
 
 from ..utils.runtime_overrides import apply_dataclass_overrides
+from .hough import (
+    HoughLaneConfig,
+    HoughLaneResult,
+    LaneTracker,
+    detect_lanes_hough,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -179,16 +184,15 @@ class LaneProcessor:
 
     def __init__(self, config: Optional[LaneProcessingConfig] = None) -> None:
         self._config = config or DEFAULT_PROCESSING_CONFIG
-        self._prev_left: Optional[Tuple[float, ...]] = None
-        self._prev_right: Optional[Tuple[float, ...]] = None
+        self._tracker: LaneTracker = LaneTracker(_adapt_config(self._config))
 
     def reset(self) -> None:
         """Reset temporal state (call when switching videos)."""
-        self._prev_left = None
-        self._prev_right = None
+        self._tracker.reset()
 
     def update_config(self, config: LaneProcessingConfig) -> None:
         self._config = config
+        self._tracker = LaneTracker(_adapt_config(config))
 
     def update(
         self,
@@ -196,43 +200,9 @@ class LaneProcessor:
         context_state: Any = None,
     ) -> LaneOutput:
         """Process one frame with temporal smoothing applied."""
-        raw = process_frame(frame, context_state, config=self._config)
-
-        if raw.is_trapezoid:
-            self._prev_left = None
-            self._prev_right = None
-            return raw
-
-        roi_h = raw.roi_y2 - raw.roi_y1
-        alpha = self._config.damping_alpha
-        max_shift = self._config.max_shift_px
-
-        left_poly = _blend_poly(
-            raw.left_poly if raw.left_detected else None,
-            self._prev_left,
-            alpha,
-            max_shift,
-            roi_h,
+        return process_frame(
+            frame, context_state, config=self._config, tracker=self._tracker
         )
-        right_poly = _blend_poly(
-            raw.right_poly if raw.right_detected else None,
-            self._prev_right,
-            alpha,
-            max_shift,
-            roi_h,
-        )
-
-        if raw.left_detected and left_poly is not None:
-            self._prev_left = left_poly
-        elif raw.left_poly is None:
-            self._prev_left = None
-
-        if raw.right_detected and right_poly is not None:
-            self._prev_right = right_poly
-        elif raw.right_poly is None:
-            self._prev_right = None
-
-        return _rebuild_with_polys(raw, left_poly, right_poly)
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +214,7 @@ def process_frame(
     context_state: Any = None,
     *,
     config: Optional[LaneProcessingConfig] = None,
+    tracker: Optional[LaneTracker] = None,
 ) -> LaneOutput:
     """Detect lane boundaries in a dashcam frame.
 
@@ -295,23 +266,21 @@ def process_frame(
     )
 
     roi = frame[y1:y2, :]
+    roi_h = y2 - y1
 
     if use_degraded:
         edges = _preprocess_degraded(roi, cfg, weather_str, light_str)
     else:
         edges = _preprocess_normal(roi, cfg)
 
-    lines = cv2.HoughLinesP(
-        edges,
-        rho=1,
-        theta=np.pi / 180,
-        threshold=_hough_threshold(cfg, use_degraded),
-        minLineLength=_hough_min_length(cfg, use_degraded),
-        maxLineGap=_hough_max_gap(cfg, use_degraded),
-    )
+    hough_cfg = _adapt_config(cfg, degraded=use_degraded)
+    hough_result: HoughLaneResult = detect_lanes_hough(edges, roi_h, w, hough_cfg, tracker)
+    left_poly = hough_result.left_poly
+    right_poly = hough_result.right_poly
+    left_conf = hough_result.left_conf
+    right_conf = hough_result.right_conf
 
-    if lines is None:
-        # Always provide a road surface in front of the ego vehicle.
+    if left_poly is None and right_poly is None:
         return _build_trapezoid(
             h,
             w,
@@ -321,52 +290,6 @@ def process_frame(
             mode_str=mode_str,
             edges=edges,
         )
-
-    mid_x = w / 2.0
-    roi_h = y2 - y1
-
-    left_points: List[Tuple[float, float]] = []
-    right_points: List[Tuple[float, float]] = []
-    left_len_acc = 0.0
-    right_len_acc = 0.0
-
-    for line in lines:
-        x1_l, y1_l, x2_l, y2_l = line[0]
-        dx = x2_l - x1_l
-        dy = y2_l - y1_l
-        if dx == 0:
-            continue
-        slope = dy / dx
-        abs_slope = abs(slope)
-        if abs_slope < cfg.slope_min or abs_slope > cfg.slope_max:
-            continue
-
-        seg_len = float(np.hypot(dx, dy))
-        cx = (x1_l + x2_l) / 2.0
-        cy = (y1_l + y2_l) / 2.0
-
-        # Focus only on road area in front of the vehicle.
-        if cy < roi_h * cfg.min_line_mid_y_frac:
-            continue
-
-        exp_left = _expected_lane_x(roi_h, w, float(cy), left=True, cfg=cfg)
-        exp_right = _expected_lane_x(roi_h, w, float(cy), left=False, cfg=cfg)
-        gate_px = w * 0.22
-
-        if slope < 0 and cx < mid_x and abs(cx - exp_left) <= gate_px:
-            left_points.append((float(x1_l), float(y1_l)))
-            left_points.append((float(x2_l), float(y2_l)))
-            left_len_acc += seg_len
-        elif slope > 0 and cx > mid_x and abs(cx - exp_right) <= gate_px:
-            right_points.append((float(x1_l), float(y1_l)))
-            right_points.append((float(x2_l), float(y2_l)))
-            right_len_acc += seg_len
-
-    left_conf = min(1.0, left_len_acc / cfg.max_accum_length)
-    right_conf = min(1.0, right_len_acc / cfg.max_accum_length)
-
-    left_poly = _fit_lane_poly(left_points) if len(left_points) >= 4 else None
-    right_poly = _fit_lane_poly(right_points) if len(right_points) >= 4 else None
 
     left_detected = left_conf >= cfg.min_confidence
     right_detected = right_conf >= cfg.min_confidence
@@ -388,7 +311,6 @@ def process_frame(
         lane_confidence = right_conf
     else:
         lane_confidence = 0.0
-
     lane_width_px: Optional[float] = None
     if left_poly is not None and right_poly is not None:
         y_bot = float(roi_h - 1)
@@ -521,6 +443,30 @@ def _hough_min_length(cfg: LaneProcessingConfig, degraded: bool) -> int:
 def _hough_max_gap(cfg: LaneProcessingConfig, degraded: bool) -> int:
     return cfg.hough_max_gap + 40 if degraded else cfg.hough_max_gap
 
+
+def _adapt_config(cfg: LaneProcessingConfig, *, degraded: bool = False) -> HoughLaneConfig:
+    """Map LaneProcessingConfig fields onto HoughLaneConfig.
+
+    This keeps the public LaneProcessingConfig API stable while the
+    underlying Hough engine uses its own, richer parameter set.
+    """
+    base_thresh = max(15, cfg.hough_threshold - 10) if degraded else cfg.hough_threshold
+    base_min_len = max(15, cfg.hough_min_length - 10) if degraded else cfg.hough_min_length
+    base_max_gap = cfg.hough_max_gap + 40 if degraded else cfg.hough_max_gap
+
+    return HoughLaneConfig(
+        scale_a_threshold=base_thresh,
+        scale_a_min_length=base_min_len,
+        scale_a_max_gap=base_max_gap,
+        scale_b_threshold=max(12, base_thresh - 12),
+        scale_b_min_length=max(10, base_min_len - 12),
+        scale_b_max_gap=base_max_gap + 50,
+        scale_c_threshold=max(10, base_thresh - 20),
+        scale_c_min_length=max(8, base_min_len - 18),
+        scale_c_max_gap=base_max_gap + 100,
+        slope_min=cfg.slope_min,
+        slope_max=cfg.slope_max,
+    )
 
 # ---------------------------------------------------------------------------
 # Trapezoid fallback

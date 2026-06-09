@@ -109,113 +109,59 @@ Zbog toga se u obradi uvode metode vremenskog zaglađivanja, poput pomičnog pro
 \section{Detekcija prepreka i praćenje objekata}
 Važno je objasniti razliku između detekcije i praćenja objekata. Dok detekcija objekata na slici odgovara na pitanje: \textit{što je na slici u ovom trenutku}, praćenje odgovara na pitanje \textit{je li to isti objekt kroz više uzastopnih slika i kako se kreće?}.
 
-U kontekstu vožnje, prepreka je svaki objekt koji može utjecati na sigurnost putanje vozila, to može biti drugo vozilo, pješak, biciklist, statična prepreka na traci ili nešto drugo. 
-% Ova sekcija treba objasniti teoriju obstacle detectiona i praćenja.
-% Predloži 3 odlomka.
-% Treba pokriti:
-% - što je obstacle detection u prometnoj sceni
-% - osnovni pristupi: foreground/background, konture, ROI filtriranje
-% - zašto je važno razlikovati detekciju od praćenja
-% - IoU kao ideja za povezivanje objekata kroz frameove
-%
-% Obavezno napomeni:
-% - objekte ne treba gledati samo kao trenutne detekcije nego kao vremenske tragove
-% - praćenje pomaže procjeni brzine približavanja
-%
-% Dobar vizualni dodatak:
-% - primjer bounding boxa na frameu
-% - mali primjer IoU preklapanja između dva framea
+U kontekstu vožnje, prepreka je svaki objekt koji može utjecati na sigurnost putanje vozila, to može biti drugo vozilo, pješak, biciklist, statična prepreka na traci ili nešto drugo.
+
+U praksi se detekcija prepreka često ne svodi na prepoznavanje točne klase objekta nego na izdvajanje regija slike koje odstupaju od pozadine i mogu predstavljati opasnost za vozilo. Kod klasičnih pristupa to se može raditi usporedbom prednjeg plana i pozadine, analizom kontura te dodatnim filtriranjem regije od interesa kako bi se obrada zadržala na dijelu slike gdje se realno očekuju vozila, pješaci ili druge prepreke.
+
+Međutim, sama detekcija po pojedinom okviru nije dovoljna ako želimo stabilan i upotrebljiv sustav. Objekt ne treba promatrati samo kao trenutnu detekciju nego kao vremenski trag koji postoji kroz više uzastopnih slika. Upravo zato je praćenje važno jer omogućuje da sustav zadrži identitet objekta kroz vrijeme, smanji oscilacije položaja i pouzdanije procijeni približava li se prepreka vozilu ili se udaljava. Na taj način izlaz sustava postaje stabilniji i pogodniji za kasniju procjenu rizika.
+
+Jedan od najjednostavnijih načina povezivanja objekata kroz uzastopne okvire temelji se na preklapanju njihovih omeđujućih pravokutnika, odnosno \textit{bounding boxeva}. Za tu se svrhu često koristi mjera \textit{Intersection over Union} (IoU), koja opisuje koliki je odnos između preklapanja dviju detekcija i njihove ukupne površine. Ako je preklapanje dovoljno veliko, sustav može pretpostaviti da se radi o istom objektu u sljedećem okviru. Takav pristup ne daje samo stabilnije praćenje nego i olakšava procjenu gibanja objekta, što je posebno važno u prometnim scenama gdje je potrebno na vrijeme prepoznati opasnost od približavanja.
 
 \subsection{Osnovne geometrijske mjere}
-% Ovdje možeš površno objasniti:
-% - bounding box
-% - centroid
-% - površina objekta
-% - aspektni omjer
-% - udaljenost između objekata ili centara
-%
-% Ako želiš, ovdje je dobro objasniti zašto se neke detekcije filtriraju po veličini i obliku.
+Opišemo li objekt na slici samo klasom (drugi automobil, kamion, motocikl...), tada gubimo velik dio informacije koja je važna za daljnju procjenu rizika. Zbog toga se u praksi uz svaku detekciju promatraju i osnovne geometrijske mjere objekta. Najčešći prikaz je omeđujući pravokutnik (\textit{bounding box}) koji određuje položaj i približnu veličinu objekta na slici. Iz njega se dalje jednostavno mogu dobiti širina, visina i površina objekta, kao i njegov centroid, odnosno središnja točka koja služi kao praktična referenca za opis položaja i kretanja.
+
+Osim samog položaja, korisno je promatrati i oblik detekcije. Površina objekta može dati grubu informaciju o tome koliko je objekt blizu ili koliko prostora zauzima u vidnom polju, dok aspektni omjer (\textit{širina/visina}) pomaže razlikovati različite tipove detekcija i ukloniti one koje izgledom ne odgovaraju očekivanim preprekama. U nekim situacijama korisno je pratiti i udaljenost između centroida dvaju objekata ili promjenu centroida istog objekta kroz vrijeme, jer to daje dodatnu informaciju o relativnom položaju i približavanju. Upravo zato se dio detekcija često filtrira prema veličini, obliku ili položaju, kako bi sustav zadržao samo one kandidate koji imaju smisla u prometnoj sceni.
 
 \subsection{Praćenje objekata kroz vrijeme}
-% Ovdje objasni kako tracking koristi uzastopne frameove.
-% Treba pokriti:
-% - stabilni ID-jevi
-% - povezivanje detekcija po sličnosti / IoU
-% - osnovna ideja kratkoročnog praćenja
-% - zašto tracking olakšava procjenu relativne brzine
-%
-% Dovoljno je teorijski opisati, bez ulaska u kod.
+Praćenje objekata kroz vrijeme temelji se na ideji da se detekcije iz uzastopnih slika ne promatraju kao nepovezani rezultati, nego kao pojave istog objekta u različitim trenucima. Zbog toga sustav svakom objektu nastoji pridružiti stabilan identitet kroz više frameova, kako bi bilo moguće pratiti njegov položaj, smjer gibanja i promjene veličine na slici.
+
+U najjednostavnijem slučaju povezivanje se provodi prema sličnosti položaja i veličine omeđujućeg pravokutnika, pri čemu se često koristi i mjera preklapanja poput IoU kako bi se procijenilo radi li se i dalje o istom objektu. Takav kratkoročni \textit{tracking} posebno je važan u prometnim scenama jer pojedinačna detekcija sama po sebi ne daje dovoljno informacija o ponašanju objekta. Tek kada se objekt prati kroz više uzastopnih slika moguće je pouzdanije procijeniti približava li se vozilu, zadržava li stabilan položaj u prometnoj traci ili se od njega udaljava. Na taj način praćenje ne služi samo za vizualnu stabilnost rezultata, nego i kao važna osnova za procjenu relativne brzine i kasniji izračun rizika sudara.
 
 \section{Vrijeme do sudara i procjena rizika}
-% Ova sekcija je jedna od najvažnijih za rad.
-% Predloži 3-4 odlomka.
-% Treba pokriti:
-% - definicija TTC (time-to-collision)
-% - intuitivna interpretacija TTC-a
-% - veza između udaljenosti i relativne brzine
-% - zašto TTC nije uvijek dovoljno precizan, ali je vrlo koristan kao heuristika
-%
-% Matematički dio:
-% - osnovna formula TTC = udaljenost / relativna brzina
-% - što se događa kada je relativna brzina nula ili negativna
-% - ograničenja kad nemaš dubinu i točnu brzinu vozila
-%
-% Obavezno napomeni:
-% - u ovom radu TTC je dio šireg risk score sustava
-% - procjena rizika može uključivati i lateralnu poziciju objekta
-%
-% Preporučeni vizualni dodatak:
-% - dijagram približavanja objekta prema vozilu s označenim TTC
+Vrijeme do sudara (\textit{Time-to-Collision} \--- TTC) jedna je od najčešće korištenih mjera u sustavima pomoći vozaču jer na intuitivan način opisuje koliko je vremena preostalo do mogućeg sudara ako se trenutačno gibanje vozila i prepreke ne promijeni. Zbog toga je ova mjera posebno korisna u sustavima upozorenja na frontalni sudar i automatskog kočenja u nuždi, gdje nije dovoljno samo detektirati objekt nego i procijeniti hitnost reakcije.
+
+U najjednostavnijem obliku TTC se može izraziti kao omjer udaljenosti do objekta i relativne brzine približavanja
+\begin{equation}
+    TTC = \frac{d}{v_{rel}}
+\end{equation}
+gdje je $d$ procijenjena udaljenost do prepreke, a $v_{rel}$ relativna brzina između vozila i prepreke. Intuitivno, što je udaljenost manja i što je približavanje brže, to je TTC manji i rizik veći. Ako je relativna brzina jednaka nuli, tada nema približavanja i TTC praktično nema korisno značenje, dok u slučaju negativne relativne brzine objekt više ne predstavlja neposrednu prijetnju jer se udaljava.
+
+Iako je TTC vrlo koristan, on nije uvijek potpuno precizan pokazatelj stvarnog rizika. U sustavima koji koriste samo jednu kameru udaljenost i relativna brzina često se ne mogu mjeriti izravno, nego se procjenjuju posredno na temelju promjene položaja i veličine objekta kroz vrijeme. Zbog toga TTC treba promatrati kao korisnu heuristiku, a ne kao apsolutno točnu fizikalnu veličinu. Dodatno, sama činjenica da je neki objekt ispred vozila nije dovoljna za procjenu opasnosti ako se ne uzme u obzir i njegov lateralni položaj, odnosno nalazi li se doista na putanji vozila ili izvan nje.
+
+U ovom radu TTC se ne koristi kao jedini kriterij odlučivanja, nego kao dio šire procjene rizika. Konačna procjena opasnosti može zato uključivati i druge informacije, poput položaja objekta unutar prometne trake, stabilnosti detekcije i konteksta scene. Stoga se u konačnoj kalkulaciji računa \textit{risc score} o kojem ćemo kasnije. Takav pristup je robusniji jer omogućuje da sustav ne reagira samo na najmanju izmjerenu udaljenost, nego na stvarnu vjerojatnost da će objekt predstavljati opasnost za kretanje vozila.
 
 \section{Kinematički model vozila i kočenje}
-% Ova sekcija treba objasniti dovoljno teorije da se opravda braking logic.
-% Predloži 3 odlomka.
-% Treba pokriti:
-% - što je kinematički model i po čemu se razlikuje od dinamičkog
-% - bicycle model kao standardna aproksimacija
-% - kako brzina i zakretanje utječu na putanju
-% - zaustavni put i reakcijski put kao koncepti
-%
-% Matematičke stvari koje vrijedi spomenuti:
-% - veza između brzine, udaljenosti i vremena
-% - ideja kočnog puta
-% - utjecaj koeficijenta trenja mu na zaustavljanje
-%
-% Obavezno napomeni:
-% - podloga i vremenski uvjeti mijenjaju efektivnu kočivost
-% - zbog toga je u radu koristan braking multiplier / korekcija prema podlozi
-%
-% Ako koristiš sliku:
-% - nacrtaj vozilo, putanju i zonu kočenja
+Za opis gibanja vozila u ovakvom sustavu nije nužno koristiti potpuno detaljan dinamički model koji uključuje sile, momente i složeno ponašanje ovjesa i guma. U većini praktičnih slučajeva dovoljan je jednostavan kinematički model, čiji je cilj opisati kako se vozilo kreće kroz prostor s obzirom na brzinu i zakretanje. Takav pristup prikladan je jer omogućuje dovoljno dobar opis putanje vozila bez uvođenja nepotrebne složenosti. Jedna od najčešćih aproksimacija je takozvani \textit{bicycle model} (str.~27--31)\supercite{rajamani2011}, u kojem se vozilo promatra kao pojednostavljen sustav s jednom prednjom i jednom stražnjom osi. Na taj način lakše je objasniti kako brzina i kut zakretanja utječu na budući položaj vozila na cesti.
+
+U kontekstu sigurnosnih sustava posebno je važno razumjeti odnos između brzine, vremena i udaljenosti. Što se vozilo kreće većom brzinom, to mu je potrebno više prostora da bi se sigurno zaustavilo. Zbog toga se razlikuju reakcijski put i kočni put. Reakcijski put predstavlja udaljenost koju vozilo prijeđe od trenutka prepoznavanja opasnosti do početka kočenja, dok kočni put opisuje udaljenost potrebnu da se vozilo nakon toga potpuno zaustavi. Ukupni zaustavni put zato ovisi i o vremenu reakcije i o mogućnosti vozila da razvije dovoljno usporenje. U pojednostavljenom prikazu može se reći da s porastom brzine raste i potrebna udaljenost za zaustavljanje, zbog čega isti objekt pri većim brzinama predstavlja znatno veći rizik.
+
+Na samu učinkovitost kočenja ne utječe samo brzina vozila nego i stanje podloge te uvjeti okoline. Mokra, skliska ili oštećena površina ceste smanjuje efektivnu raspoloživu silu trenja između gume i podloge, pa se vozilo zaustavlja sporije i na duljoj udaljenosti. Upravo zato u ovakvim sustavima ima smisla uvesti korekcijski faktor ili \textit{braking multiplier} kojim se osnovna procjena kočenja prilagođava stvarnim uvjetima vožnje. Ovaj faktor se koristi u procjeni spomenutog \textit{risc score} koeficijenta. Takva korekcija omogućuje da sustav ne pretpostavlja jednake mogućnosti zaustavljanja u svim scenama, nego da procjenu rizika i logiku kočenja prilagodi kvaliteti podloge i drugim važnim parametrima.
 
 \section{Kontekstno usmjeravanje rada sustava}
-% Ova sekcija povezuje teoriju sa stvarnim scenarijima iz projekta.
-% Predloži 3 odlomka.
-% Treba pokriti:
-% - visibility estimation kao heuristička procjena kvalitete scene
-% - lane confidence kao mjera pouzdanosti traka
-% - road surface heuristika i zašto je korisna za kočenje
-% - režimi rada: marked / degraded / unmarked / emergency
-% - histereza kao način da se spriječi prečesto prebacivanje moda
-%
-% Ovdje možeš objasniti:
-% - zašto se parametri moraju prilagoditi scenama različite kvalitete
-% - zašto je bolje imati fallback ponašanje nego forsirati jednu strategiju
-%
-% Preporučeni vizualni dodatak:
-% - tablica ili state machine dijagram koji prikazuje prijelaze između modova
+U ovom radu kontekstno usmjeravanje algoritma nije zamišljeno kao dodatni ukras nad osnovnim pipelineom, nego kao mehanizam koji u svakom trenutku procjenjuje koliko je scena pouzdana za daljnju obradu. Sustav zato iz svakog N-tog okvira prvo računa skup globalnih metrika slike, primjerice svjetlinu, kontrast, gustoću rubova, zamućenje i odsjaj, pa iz njih gradi heurističku procjenu vidljivosti. Paralelno se prati i pouzdanost traka kroz lane confidence, pri čemu se sirova detekcija ne uzima kao konačna istina, nego se zaglađuje kroz vrijeme kako bi se smanjila oscilacija između susjednih frameova. Time se izbjegava da pojedini kratkotrajni artefakti (sjena, kapljice, bljesak farova) odmah promijene ponašanje sustava.
+
+Na temelju ovih procjena router bira režim rada sustava. Ako su vidljivost i pouzdanost traka dovoljno visoki, aktivan je \textit{normal\_marked} režim. Kada su trake još uvijek prisutne, ali je kvaliteta scene slabija, sustav prelazi u \textit{degraded\_marked} i prilagođava parametre obrade kako bi zadržao stabilnost izlaza. Ako trake nisu pouzdane, a slika je i dalje upotrebljiva, aktivira se \textit{unmarked\_good\_vis} fallback s konzervativnijom geometrijom promatranja. U najnepovoljnijim uvjetima, kada su i trake i vidljivost degradirani, koristi se \textit{unmarked\_degraded} režim. Dodatno postoji i \textit{emergency\_override} koji može odmah preuzeti prioritet kada je detektirana kritična situacija. Kako bi se spriječilo često i nepotrebno prebacivanje modova, promjena se potvrđuje tek nakon unaprijed zadanog broja uzastopnih frameova, odnosno kroz mehanizam histereze.
+
+Poseban dio kontekstnog usmjeravanja odnosi se na heurističku procjenu podloge ceste i njezin utjecaj na logiku kočenja. Sustav iz donjeg dijela slike procjenjuje radi li se vjerojatnije o suhoj, mokroj ili hrapavijoj podlozi, te iz toga određuje korekcijski faktor \textit{braking multiplier}. Taj faktor ne služi za apsolutno fizikalno mjerenje koeficijenta trenja, nego za konzervativniju prilagodbu pragova upozorenja i kočenja u modulu procjene rizika. Na taj način isti numerički TTC nema jednako značenje u svim scenama: na lošijoj podlozi sustav ranije povećava oprez i ranije ulazi u stroži režim reakcije. Upravo zbog toga je ovakav pristup robusniji od jedne fiksne konfiguracije parametara, jer omogućuje prilagodbu stvarnim uvjetima umjesto forsiranja jedinstvene strategije u svim scenarijima.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\linewidth,height=0.6\textheight,keepaspectratio]{State_masina.png}
+    \caption{Dijagram stanja kontekstnog usmjeravanja ADAS sustava s četiri radna režima i stanjem \textit{emergency\_override}.}
+    \label{fig:state_machine_context}
+\end{figure}
 
 \section{Metode evaluacije}
-% Ova završna sekcija treba objasniti kako se procjenjuje kvaliteta sustava.
-% Predloži 2-3 odlomka.
-% Treba pokriti:
-% - precision, recall, F1
-% - stabilnost moda / broj prebacivanja
-% - FPS kao mjera real-time performansi
-% - po potrebi AUC ili slične mjere za risk scoring
-%
-% Obavezno napomeni:
-% - nije dovoljno samo da sustav radi, nego i da je stabilan i dovoljno brz
-% - metričke mjere kasnije poveži s testnim poglavljem
-%
-% Ako želiš, ovdje se može ubaciti mala tablica sa svim metrikama i njihovim značenjem.
+U implementaciji u ovom radu evaluacija se temelji na performansama izvođenja i ponašanju sustava kroz vrijeme, a ne na punoj offline klasifikacijskoj analizi.
+Brzina rada mjeri se kroz \textit{FPS}, što je ključna mjera jer sustav mora zadržati real-time obradu u kontinuiranom video toku.
+Stabilnost kontekstnog usmjeravanja procjenjuje se analizom logiranih promjena režima rada (broj i učestalost \textit{mode\_change} događaja).

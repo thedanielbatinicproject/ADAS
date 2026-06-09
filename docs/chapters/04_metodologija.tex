@@ -1,11 +1,63 @@
 % !TeX root = ../main.tex
 \chapter{Metodologija}
+U ovom poglavlju opisana je metodologija kojom je izgrađen ADAS sustav, s naglaskom na dizajnerske odluke, tok obrade i razlog odabira konkretnih pristupa u svakoj fazi. Za razliku od teorijskog dijela koji opisuje koncepte i matematičke osnove, ovdje je fokus na tome kako su ti koncepti primijenjeni i kako međusobno djeluju u cjelovitom sustavu. Poseban naglasak stavljen je na kontekstno svjestan pristup koji prilagođava parametre detekcije i logiku odlučivanja prema procjeni kvalitete scene u trenutku izvođenja. Takav pristup nije samo tehnička odluka nego i odgovor na stvarna ograničenja sustava koji se oslanja isključivo na jednu prednju kameru bez podataka o brzini, dubini ili vanjskim senzorima.
 
-\section{Cannyjeva detekcija rubova}
-Placeholder tekst.
+\section{Metodološki okvir i tok obrade}
+Sustav je izgrađen kao modularan deterministički \textit{pipeline} u kojemu svaki korak obrade prima jasno definirani ulaz i producira jasno definirani izlaz. Takav pristup olakšava zamjenu pojedinih komponenti, testiranje u izolaciji i razumijevanje uzroka svake odluke sustava. Konceptualni redoslijed faza unutar jednog okvira je sljedeći: dohvat slike iz predmemorije, kontekstna analiza scene, detekcija prometnih traka, detekcija i praćenje prepreka, procjena rizika sudara, logika odlučivanja te prikaz rezultata kroz korisničko sučelje. Svaki od modula prima izlaz prethodnih faza i kontekstno stanje, čime se parametri prilagođavaju sceni koja se trenutno obrađuje.
 
-\section{Transformacija perspektive}
-Placeholder tekst.
+Jedan od ključnih dizajnerskih izbora je odvajanje kontekstne analize od ostatka \textit{pipeline-a} u zasebnu pozadinsku dretvu. Kontekstna analiza, koja procjenjuje vidljivost, stanje površine i dostupnost traka, računski je skuplja od ostalih modula i nije nužno potrebna za svaki okvir. Zbog toga je implementirana klasa \textit{ContextService} koja pokreće vlastitu \textit{daemon} dretvu i asinkrono obrađuje dolazne okvire. Glavna petlja šalje okvire pozadinskoj dretvi putem neblokirajućeg poziva \texttt{push\_frame()}, a zatim odmah čita posljednje dostupno kontekstno stanje putem \texttt{get\_state()}. Ako analiza još nije završena, koristi se prethodno stanje, čime se izbjegava čekanje i osigurava konzistentna brzina obrade. Kontekst se ne računa za svaki okvir, nego svakih \textit{N} okvira (zadana vrijednost je svakih 5), što dodatno smanjuje opterećenje procesora. Ako nova analiza stigne dok prethodna još nije preuzeta, stari neobrađeni okvir se odbacuje i zadržava samo najnoviji.
 
-\section{Kinematički model}
-Placeholder tekst.
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\linewidth]{DijagramDretvi.png}
+    \caption{Dretveni model izvršavanja sustava: glavna petlja obrade okvira i pozadinska kontekstna analiza}
+    \label{fig:dada_categories}
+\end{figure}
+
+Kako bi se izbjeglo čitanje s diska unutar vremenske petlje, svi okviri videa učitavaju se u RAM memoriju u fazi inicijalizacije, prije nego što petlja krene. Rezultat je rječnik \textit{frame cache} koji preslikava indeks okvira u matricu slike. Time se osigurava predvidivo i nisko vrijeme dohvata u svakoj iteraciji petlje, neovisno o brzini pohrane ili dekodiranja. Slijed inicijalizacije prati sljedeći redoslijed: dohvat zapisa iz SQLite indeksa, izgradnja iteratora okvira, punjenje predmemorije, inicijalizacija svih modula i pokretanje kontekstnog servisa, a tek onda ulazak u glavnu petlju obrade.
+
+Svaki modul (\texttt{LaneProcessor}, \texttt{Detector}, \texttt{SimpleTracker}, \texttt{RiskEstimator} i \texttt{decide()}) inicijalizira se jednom i zadržava interno stanje kroz sve okvire. To znači da je svaki od njih statefull u smislu da pamti prethodne rezultate i koristi ih za stabilizaciju, ovakvim pristupom . 
+
+Osim obrade, sustav bilježi značajne događaje (pokretanje videa, promjene moda, upozorenja, kočenja) u JSONL log datoteku za kasniju analizu. Zvučno upozorenje aktivira se s minimalnim razmakom od 30~okvira između uzastopnih alertova kako bi se izbjeglo prečesto oglašavanje u nestabilnim scenama.
+
+\section{Kontekstno usmjeravanje sustava}
+Procjena vidljivosti scene temelji se na četiri metrike koje se računaju isključivo iz gornjeg dijela slike (zadano: 65\% visine okvira) kako bi se isključio donji dio snimke s asfaltom i haubom vozila. Te metrike su normalizirani kontrast, varijanca Laplacijevog gradijenta kao mjera zamućenosti, gustoća rubova i udio previše exponiranih piksela kao mjera odsjaja. Kombiniraju se u ukupnu ocjenu pouzdanosti vidljivosti kao težinska suma s vrijednostima $w_{\text{kontrast}} = 0{,}20$, $w_{\text{zamućenost}} = 0{,}30$, $w_{\text{rubovi}} = 0{,}38$ i $w_{\text{odsjaj}} = 0{,}12$, pri čemu su rasponi normalizacije kalibrirani prema stvarnim karakteristikama DADA-2000 snimki dash kamere, a ne prema vrijednostima tipičnim za kamere visoke rezolucije. Prag koji dijeli dobru od degradirane vidljivosti postavljen je na $t_{\text{vis}} = 0{,}5$. Noćna detekcija implementirana je dvojnim putem: primarni put provjerava nalazi li se 25. percentil svjetline ispod praga 55, što ukazuje na to da više od 75\% scene pripada tamnim tonovima, dok je sekundarni put rezervna kombinacija 5. percentila i srednje vrijednosti. U slučaju detekcije atmosferskog zamućenja (magle, kiše ili sl.) primjenjuje se metoda \textit{Dark Channel Prior} kojom se razlikuje maglena scena od scene s direktnim solarnim odsjajem, jer ta dva slučaja daju sličan globalni \textit{glare score} ali bitno različit lokalni signal u cestovnom dijelu slike.
+
+Pouzdanost traka računa se heurističkom detekcijom u modulu \texttt{lane\_heuristic} unutar regije od interesa. Sirovi rezultat detekcije zaglađuje se eksponencijalnim pomičnim prosjekom s faktorom $\alpha = 0{,}3$ koji daje veću težinu novijim mjerenjima uz postupno zaboravljanje starih. Prag za minimalnu prisutnost traka postavljen je na $t_{\text{lane\_low}} = 0{,}10$, što je namjerno niža vrijednost od praga pune pouzdanosti ($t_{\text{lane}} = 0{,}6$), jer u urbanim scenama s isprekidanim oznakama, odbijanjima svjetlosnih zraka i raskrižjima čak i isprekidana Houghova transformacija nosi korisnu informaciju o geometriji ceste.
+
+Procjena stanja podloge provodi se iz donjeg dijela regije od interesa uz isključenje donjih 20\% okvira koji odgovaraju haubu vozila. Algoritam kombinira mjeru hrapavosti teksture i uniformnosti boje kako bi klasificirao podlogu u četiri kategorije: suha asfaltna, mokra asfaltna, šljunčana ili nepoznata. Svaka kategorija nosi korekcijski faktor zaustavljanja koji iznosi $1{,}0$ za suhu asfaltnu, $1{,}4$ za mokru, $2{,}0$ za šljunčanu i $1{,}2$ za nepoznatu podlogu. Na temelju kombinacije ocjene vidljivosti i pouzdanosti traka router primjenjuje matricu odluke s četiri ishoda: ako su prisutne i trake i dobra vidljivost aktivan je \textit{normal\_marked} mod, trake bez dobre vidljivosti daju \textit{degraded\_marked}, dobra vidljivost bez traka daje \textit{unmarked\_good\_vis}, a bez oboje \textit{unmarked\_degraded}. Svaka promjena moda potvrđuje se tek nakon $k = 5$ uzastopnih okvira s istim kandidatnim modom.
+
+
+
+\section{Detekcija traka, prepreka i praćenje objekata}
+
+Detekcija prometnih traka provodi se unutar klase \texttt{LaneProcessor} koja prima aktivno kontekstno stanje i prema njemu prilagođava strategiju preprocesiranja. U standardnim uvjetima slika prolazi pretvorbu u sivine, Gaussovo zaglađivanje i Cannyjevu detekciju rubova, a iz rezultirajuće rubne mape Houghovom transformacijom unutar zadanog ROI-a izdvajaju se kandidati linija. Geometrija trake modelira se polinomom drugog stupnja $x(y) = ay^2 + by + c$, a koeficijenti se procjenjuju metodom najmanjih kvadrata iz skupa detektiranih točaka. Koeficijenti polinoma ne resetiraju se između okvira nego se temporalno prigušuju prema prethodno prihvaćenom stanju, čime se sprječava nagli skok geometrije trake između uzastopnih okvira čak i kada detekcija u jednom okviru nije potpuna. U degradiranom modu, umjesto standardnog Gaussovog zamućenja, primjenjuje se CLAHE ekvilizacija histograma (napredno lokalno pojačavanje kontrasta) i bilateralni filtar (pametni filter koji briše "snijeg" i šum sa slike, ali ne muti oštre rubove) koji bolje čuvaju rubove uz agresivniju redukciju šuma u uvjetima slabog kontrasta ili mokre ceste.
+
+Detekcija prepreka radi tako da algoritam (MOG2) neprestano uči kako izgleda statična pozadina ceste. Sve što se na slici pojavi, a statistički odskače od tog modela pozadine, sustav automatski prepoznaje kao objekt u pokretu (prepreku). Analizira se samo središnji dio okvira (ROI) kako bi se isključili nebo i vozilo, dok se objekti manji od 400~px² ignoriraju kao šum. Osjetljivost sustava (MOG2 prag od 50{,}0) automatski se povećava u lošim uvjetima kako bi se vozila prepoznala i pri slabom kontrastu. Udaljenost se računa pomoću osnovnog modela kamere, uz pretpostavljenu visinu vozila $h_{\text{obj}} = 1{,}5$~m i žarišnu duljinu $f = 700$~px, prema formuli:
+\begin{equation}
+    d = \frac{f \cdot h_{\text{obj}}}{h_{\text{px}}}
+\end{equation}
+gdje je $h_{\text{px}}$ izmjerena visina omeđujućeg pravokutnika u pikselima. Ova procjena nije apsolutno točna, ali daje dovoljno konzistentne informacije za kasniju procjenu rizika u uvjetima bez dubinskog senzora.
+
+Modul \texttt{SimpleTracker} prati objekte kroz okvire računajući njihovo preklapanje (\textit{Intersection over Union} - IoU). Ako se nova detekcija dovoljno preklapa s postojećom, njezina se pozicija ažurira; u suprotnom, sustav je registrira kao novi objekt. Takvo kontinuirano praćenje neophodno je za kasnije računanje relativne brzine.
+
+
+\section{Procjena rizika i logika odlučivanja}
+
+Za svaku praćenu prepreku modul \texttt{RiskEstimator} gradi procjenu rizika iz tri komponente: blizine objekta normalizirane prema maksimalnoj relevantnoj udaljenosti od 40~m, TTC vrijednosti i bočnog položaja objekta u odnosu na ego-traku (imaginarna traka ispred vozila prema kojoj se isto stalno kreće). Relativna brzina izvodi se iz promjene procijenjene udaljenosti između uzastopnih okvira, a TTC kao omjer trenutne udaljenosti i te relativne brzine. Svaka komponenta normalizira se na interval $[0, 1]$ i kombinira u ukupni \textit{risk score} težinskom sumom, pri čemu bočni položaj nosi smanjenu težinu za objekte koji se nalaze izvan ego-trake. Objekti procijenjeni dalje od 40~m zanemaruju se u trenutnoj iteraciji.
+
+Modul \texttt{decide()} prevodi \textit{risk score} i TTC u jednu od tri akcije: NONE, WARN ili BRAKE. Prag za upozorenje je $t_{\text{warn}} = 0{,}35$, a prag za kočenje $t_{\text{brake}} = 0{,}65$ (ovi parametri mogu biti podložni promjenama). TTC djeluje kao neovisna komponenta hitnosti: vrijednost ispod 3{,}0~s aktivira barem WARN, a ispod 1{,}5~s aktivira BRAKE neovisno o iznosu \textit{risk score}-a. Akcija BRAKE aktivira se isključivo za objekte koji su klasificirani kao unutar ego-trake, dok WARN može biti aktiviran i za objekte izvan trake ako je \textit{risk score} dovoljno visok.
+
+Stanje podloge iz kontekstnog modula izravno utječe na pragove odlučivanja. Na temelju \textit{braking\_multiplier} $m_b$ računa se korekcija praga
+\begin{equation}
+    p = 0{,}08 \cdot \max(0,\; m_b - 1{,}0)
+\end{equation}
+kojom se efektivni pragovi snižavaju: na mokroj podlozi ($m_b = 1{,}4$) sniženje iznosi $p = 0{,}032$, a na šljunčanoj ($m_b = 2{,}0$) iznosi $p = 0{,}08$. Rezultat je da isti \textit{risk score} na lošijoj podlozi ranije prelazi prag za aktivaciju, što u logici odlučivanja odražava stvarno povećanu opasnost koja nastaje zbog dužeg zaustavnog puta vozila.
+
+
+\section{Integracija i stabilizacija rada kroz slijed okvira}
+Stabilnost sustava rješava se unutar samih modula, a ne centralno. Kontekstni router koristi histerezu ($k = 5$ okvira) kako bi spriječio "titranje" modova. \texttt{LaneProcessor} zaglađuje promjene kako bi izbjegao nagle skokove traka, \texttt{SimpleTracker} prati objekte preko IoU-a, a \texttt{RiskEstimator} računa brzinu iz razlike udaljenosti.
+
+Moduli ne komuniciraju direktno, već svi čitaju isti \texttt{ContextState} objekt, što znatno olakšava odvojeno testiranje. Ovisno o tom kontekstu, moduli prilagođavaju svoje parametre (MOG2 prag, CLAHE, pragovi kočenja).
+
+Kako bi se izbjeglo neprestano pištanje na granici detekcije, zvučno upozorenje ima \textit{cooldown} od 30~sličica. Svi bitni događaji (WARN, BRAKE, promjene modova) logiraju se u JSONL datoteku radi lakšeg \textit{debuggiranja} i provjere pomoću DADA-2000 \textit{dataseta}.

@@ -1,11 +1,367 @@
 % !TeX root = ../main.tex
+
 \chapter{Implementacija}
 
-\section{Arhitektura sustava}
-Placeholder tekst.
+U ovom poglavlju opisana je konkretna implementacija ADAS sustava: od alata i okruženja u kojemu je razvijen, preko organizacije modula i paketa, do načina testiranja i korisničkog sučelja. Naglasak nije samo na opisu što je izgrađeno, nego i na objašnjenju zašto su određeni alati i pristupi odabrani. Sav izvorni kod projekta javno je dostupan na repozitoriju\supercite{adasgithub}.
 
-\section{Python i OpenCV}
-Placeholder tekst.
+\section{Korištene javne biblioteke}
 
-\section{CARLA simulator}
-Placeholder tekst.
+Projekt je napisan u Pythonu 3.12 i oslanja se na manji skup dobro poznatih biblioteka. Cilj je bio svesti vanjske ovisnosti na minimum i koristiti isključivo biblioteke koje imaju stabilan API i dobru dokumentaciju.
+
+\textbf{OpenCV}\supercite{opencv} (\texttt{opencv-python}) je središnja biblioteka za sve operacije računalnog vida u projektu. Koristi se u gotovo svim paketima: u \texttt{lane\_detection} za pretvorbu slike u jedan \textit{grayscale} kanal, Gaussovo zaglađivanje, Canny detekciju rubova, CLAHE preprocesiranje i Houghovu transformaciju; u \texttt{obstacle\_detection} za MOG2 oduzimanje pozadine, morfološke operacije i ekstrakciju kontura; u \texttt{context} za izračun metrika slike poput varijance Laplacijevog gradijenta; te u \texttt{ui} za iscrtavanje rezultata i pokretanje prozora za pregled.
+
+\textbf{NumPy} (\texttt{numpy}) koristi se kao osnova za sve numeričke operacije nad matricama slika. Većina izlaza OpenCV funkcija su NumPy nizovi, pa je ova biblioteka inherentno prisutna u gotovo svakom modulu koji radi s okvirima.
+
+\textbf{scikit-image} (\texttt{scikit-image}) koristi se u modulu za procjenu stanja ceste (\texttt{context/ road\_surface.py}), gdje se primjenjuje za analizu teksture površine radi razlikovanja asfaltirane, mokre i šljunčane podloge.
+
+\textbf{scikit-learn} (\texttt{scikit-learn}) koristi se za pomoćne statističke operacije, posebno u modulima koji trebaju normalizaciju ili jednostavne numeričke transformacije.
+
+\textbf{Pillow} (\texttt{pillow}) koristi se za učitavanje i konverziju slika na mjestima gdje je potrebna šira podrška za formate datoteka od one koju nudi OpenCV, primjerice pri generiranju sličica (\textit{thumbnails}) u korisničkom sučelju.
+
+\textbf{Dear PyGui} (\texttt{dearpygui}) je biblioteka za izgradnju grafičkih korisničkih sučelja temeljena na GPU renderiranju. Koristi se za implementaciju glavnog upravljačkog panela (\texttt{ui/master\_panel.py}) koji objedinjuje pregled videa, tablicu zapisa iz dataseta, konfiguraciju parametara i prikaz statusa.
+
+Za razvoj se koriste i razvojne ovisnosti: \texttt{pytest} za pokretanje automatiziranih testova, \texttt{ruff} za statičku analizu koda (\textit{linting}), \texttt{black} za automatsko formatiranje i \texttt{pre-commit} za provjere prije svake predaje izmjena u repozitorij. Uz to je uključen i \texttt{jupyterlab} za potencijalnu interaktivnu analizu u Jupyter bilježnicama.
+
+\section{Postavljanje radnog okruženja}
+
+\subsection{Razvojno okruženje}
+
+Projekt je razvijen u Visual Studio Code (\textit{VS Code}) uz ekstenziju \textit{Dev Containers} koja omogućuje pokretanje razvojnog okruženja unutar Docker kontejnera. Prednost ovakvog pristupa je u tome što svaki razvojnik dobiva identično okruženje bez ručnog postavljanja Python verzija, biblioteka ili LaTeX paketa. Repozitorij se klonira i otvara u VS Code-u, a zatim se jednom naredbom (\textit{Reopen in Container}) pokreće izgradnja kontejnera u kojemu se odvija sav razvoj, pokretanje koda i kompajliranje dokumentacije.
+
+\subsection{Struktura projekta}
+
+Projekt je organiziran u nekoliko direktorija s jasno odvojenim ulogama:
+\begin{itemize}
+    \item \texttt{src/} -- izvorni kod Python paketa (jedino mjesto gdje živi logika sustava)
+    \item \texttt{tests/} -- automatizirani testovi, zrcalna struktura kao \texttt{src/}
+    \item \texttt{scripts/} -- pomoćne skripte za pokretanje scenarija, debug vizualizaciju i upravljanje datasetom
+    \item \texttt{data/} -- sirovi i obrađeni podaci (DADA-2000 skup i SQLite indeks)
+    \item \texttt{docs/} -- LaTeX izvorni kod ovog rada
+    \item \texttt{dep/} -- unaprijed preuzete binarne ovisnosti (PulseAudio za Windows)
+\end{itemize}
+
+\subsection{Docker i grafičko sučelje}
+
+Docker kontejner se gradi iz \texttt{Dockerfile}-a koji instalira Python 3.12, Poetry, sve Python ovisnosti i kompletan LaTeX distribuciju (\texttt{texlive-full}). Za grafički prikaz prozora iz kontejnera na Windows hostu potreban je X server. U projektu se koristi \textbf{VcXsrv} koji prima X11 protokol i renderira prozore na Windows desktopu. Konfiguracija je postavljena u \texttt{docker-compose.yml} koji postavlja varijable okoline \texttt{DISPLAY}, \texttt{QT\_QPA\_PLATFORM} i \texttt{QT\_X11\_NO\_MITSHM} kako bi OpenCV prozori ispravno funkcionirali.
+
+Za zvučna upozorenja (WARN i BRAKE alertovi) Docker kontejner nema izravni pristup zvučnoj kartici hosta pa se koristi \textbf{PulseAudio} kao posredni server za audio tok. Kako korisnici ne bi morali ručno instalirati PulseAudio, binarne datoteke su uključene direktno u repozitorij unutar direktorija \texttt{dep/pulseaudio-1.1/}. Na Windows hostu se pokreće priložena skripta koja PulseAudio pokreće kao lokalni server koji kontejner može doseći putem mrežne adrese hosta.
+
+\begin{lstlisting}[style=bashcode, caption={Pokretanje PulseAudio servera na Windows hostu}, label={lst:pulseaudio}]
+scripts\start_pulseaudio.bat
+\end{lstlisting}
+
+\subsection{Upravljanje ovisnostima i Makefile}
+
+Upravljanje Python ovisnostima riješeno je alatom \textbf{Poetry}. Sve ovisnosti i ograničenja verzija definirane su u datoteci \texttt{pyproject.toml}, a točne verzije zabilježene su u \texttt{poetry.lock} datoteci kako bi svaki \textit{build} bio jasno reproducibilan. Razvojne ovisnosti (\texttt{pytest}, \texttt{ruff}, \texttt{black}, \texttt{pre-commit}) odvojene su u zasebnu grupu kako ne bi bile instalirane u produkcijskim scenarijima.
+
+Za najčešće naredbe postoji \texttt{Makefile} koji skraćuje dugačke pozive u terminalu. Na primjer:
+
+\begin{lstlisting}[style=bashcode, caption={Najčešće Makefile naredbe}, label={lst:makefile}]
+make install         # instalira ovisnosti putem Poetry
+make test            # pokreće sve testove
+make lint            # ruff statička provjera koda
+make format          # black automatsko formatiranje
+make build           # docker compose build
+make up              # docker compose up
+\end{lstlisting}
+
+\subsection{Verzioniranje i CI/CD}
+
+Kod je verzioniran sustavom \textbf{Git}, a repozitorij je smješten na GitHubu.\supercite{adasgithub} Svaka predaja izmjena na glavnu granu (\texttt{main}) ili svaki zahtjev za spajanjem (\textit{pull request}) pokreće automatiziranu provjeru putem \textbf{GitHub Actions}. Definirani CI/CD \textit{pipeline} radi sljedeće korake: postavlja Python 3.12, instalira Poetry i ovisnosti, pokreće \texttt{ruff} statičku provjeru koda te naposljetku izvršava cijeli skup automatiziranih testova putem \texttt{pytest}. Na taj način svaka promjena u kodu automatski prolazi kroz provjeru ispravnosti prije nego što bude prihvaćena u glavnu granu.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\linewidth]{ci_github.png}
+    \caption{Prikaz GitHub Actions CI/CD \textit{pipeline-a} s koracima provjere koda i testiranja.}
+    \label{fig:ci_github}
+\end{figure}
+
+\section{Arhitektura sustava i organizacija modula}
+
+\subsection{Organizacijski pojmovi}
+
+U Pythonu je \textbf{paket} direktorij koji sadrži datoteku \texttt{\_\_init\_\_.py} i može obuhvaćati više \textbf{modula}. Modul je pojedinačna \texttt{.py} datoteka s funkcijama, klasama i konstantama. U ovom projektu sav izvorni kod nalazi se unutar paketa \texttt{adas} koji je smješten u direktoriju \texttt{src/adas/}. Unutar njega postoje podpaketi koji odgovaraju pojedinim funkcionalnim cjelinama sustava. Varijabla okoline \texttt{PYTHONPATH=/app/src} osigurava da Python interpreter može pronaći paket \texttt{adas} bez instaliranja u sistemski \textit{site-packages}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.30\linewidth]{pkg_struktura.png}
+    \caption{Struktura paketa projekta unutar direktorija \texttt{src/adas/}.}
+    \label{fig:pkg_struktura}
+\end{figure}
+
+\subsection{Paket \texttt{context}}
+
+Paket \texttt{context} odgovoran je za procjenu kvalitete scene i usmjeravanje sustava prema odgovarajućem načinu rada. Sadrži sljedeće module:
+
+\begin{itemize}
+    \item \texttt{scene\_metrics.py} -- računa metrike slike (svjetlina, zamućenost, gustoća rubova, odsjaj) i iz njih gradi ocjenu vidljivosti; ujedno implementira \textit{Dark Channel Prior} za razlikovanje magle od odsjaja
+    \item \texttt{lane\_heuristic.py} -- heuristička detekcija prisutnosti traka unutar definirane regije od interesa
+    \item \texttt{lane\_state.py} -- kombinira sirovi signal detekcije s konfigurabilnim pragovima u formalni \texttt{LaneState} objekt
+    \item \texttt{road\_surface.py} -- procjena stanja podloge (suha, mokra, šljunčana, nepoznato) iz donjeg dijela slike; određuje \textit{braking\_multiplier} koji se propagira u modul procjene rizika
+    \item \texttt{router.py} -- kombinira procjene vidljivosti i stanja traka u jedan od četiri radna moda sustava uz mehanizam histereze
+    \item \texttt{service.py} -- \texttt{ContextService} klasa koja pokreće kontekstnu analizu u pozadinskoj dretvi i nudi neblokirajući pristup posljednjem rezultatu
+    \item \texttt{defaults.py} -- sve numeričke konstante i pragovi u jednoj konfiguracijskoj klasi (\texttt{ContextConfig}) koja se može nadjačati putem runtime JSON datoteke
+    \item \texttt{types.py} -- definicija svih tipova podataka paketa: ContextState, Mode, VisibilityEstimate i slično
+\end{itemize}
+
+Javno sučelje paketa svodi se na jednu glavnu funkciju \texttt{route(frame, ...)} i klasu \texttt{ContextService} za asinkronu uporabu u petlji obrade. Isječak~\ref{lst:context_route} prikazuje tipičan poziv unutar glavne petlje:
+
+\begin{lstlisting}[style=pycode, caption={Korištenje \texttt{ContextService} u glavnoj petlji obrade}, label={lst:context_route}]
+ctx_service = ContextService(config=DEFAULT_CONFIG, context_interval=5)
+ctx_service.start()
+
+# unutar glavne petlje:
+ctx_service.push_frame(frame, frame_idx, timestamp_s=ts, fps=30.0)
+ctx_state = ctx_service.get_state()  # nikad ne blokira
+\end{lstlisting}
+
+\subsection{Paket \texttt{lane\_detection}}
+
+Paket \texttt{lane\_detection} implementira detekciju prometnih traka iz pojedinačnih okvira uz privremenu stabilizaciju između okvira. Sadrži sljedeće module:
+
+\begin{itemize}
+    \item \texttt{processing.py} -- središnji modul koji implementira \texttt{LaneProcessor} klasu s unutarnjim stanjem i \texttt{process\_frame()} funkcijskim sučeljem; uključuje standardni put pretprocesiranja (spomenuti CLAHE + bilateralni filtar), Houghovu detekciju kandidata i polinomsko \textit{namještanje} s prigušivanjem koeficijenata prema prethodnom stanju
+    \item \texttt{visualization.py} -- pomoćne funkcije \texttt{draw\_lanes()} i \texttt{draw\_edges()} za iscrtavanje rezultata detekcije na okvir; ovdje se crta i ego traka
+    \item \texttt{metrics.py} -- \texttt{evaluate\_detection()} i \texttt{evaluate\_batch()} za vrjednovanje ispravnosti detekcije traka
+    \item \texttt{hough.py} -- geometrijska detekcija traka temeljena na Houghovoj transformaciji s višerazinskim skupljanjem segmenata, RANSAC-robusnim polinomskim namještanjem i Kalmanovim filterom za vremensku stabilizaciju; integriran u \texttt{processing.py} kao primarni motor detekcije
+\end{itemize}
+
+\begin{lstlisting}[style=pycode, caption={Poziv detekcije traka unutar glavne petlje}, label={lst:lane_proc}]
+lane_processor = LaneProcessor()
+
+# unutar glavne petlje:
+lane_output = lane_processor.update(frame, ctx_state)
+\end{lstlisting}
+
+\subsection{Paket \texttt{obstacle\_detection}}
+
+Paket \texttt{obstacle\_detection} implementira detekciju i praćenje objekata u prometnoj sceni. Sadrži sljedeće module:
+
+\begin{itemize}
+    \item \texttt{detector.py} -- \texttt{Detector} klasa koja koristi MOG2 algoritam oduzimanja pozadine za izdvajanje prednjeg plana, morfološke operacije za čišćenje šuma i filtriranje kontura prema veličini, obliku i poziciji unutar ROI-a; procjena udaljenosti temelji se na heuristici s pretpostavljenom visinom objekta i kalibriranom žarišnom duljinom; parametri se dinamički prilagođavaju prema kontekstnom stanju
+    \item \texttt{tracking.py} -- \texttt{SimpleTracker} koji dodjeljuje stabilne identifikatore objektima kroz uzastopne okvire temeljem IoU mjere preklapanja omeđujućih pravokutnika
+    \item \texttt{types.py} -- \texttt{DetectedObject} dataklasa koja opisuje jedan detektirani objekt: identifikator, omeđujući pravokutnik, procijenjenu udaljenost, lateralni položaj i zastavicu je li unutar ego-trake
+    \item \texttt{metrics.py} -- \texttt{evaluate\_detections()} za vrjednovanje detekcija nasuprot referentnih anotacija
+\end{itemize}
+
+\begin{lstlisting}[style=pycode, caption={Detekcija i praćenje prepreka}, label={lst:obstacle}]
+detector = Detector()
+tracker = SimpleTracker()
+
+# unutar glavne petlje:
+raw_detections = detector.detect(frame, lane_output=lane_output,
+                                 context_state=ctx_state)
+tracked = tracker.update(raw_detections)
+\end{lstlisting}
+
+\subsection{Paket \texttt{collision\_risk}}
+
+Paket \texttt{collision\_risk} pretvara listu praćenih objekata u konkretnu preporuku za akciju. Sadrži sljedeće module:
+
+\begin{itemize}
+    \item \texttt{estimator.py} -- \texttt{RiskEstimator} koji za svaki praćeni objekt izračunava TTC, blizinu i lateralni položaj te ih kombinira u numerički \textit{risk score}; relativna brzina izvodi se iz promjene procijenjene udaljenosti između okvira uz kratki klizeći buffer
+    \item \texttt{decision.py} -- \texttt{decide()} funkcija koja uspoređuje \textit{risk score} i TTC s konfigurabilnim pragovima te vraća jednu od tri akcije (\texttt{NONE}, \texttt{WARN}, \texttt{BRAKE}) uz intenzitet; uzima u obzir i \textit{braking\_multiplier} iz kontekstnog stanja za prilagodbu pragova
+    \item \texttt{types.py} -- \texttt{RiskResult} i \texttt{SystemAction} tipovi
+    \item \texttt{metrics.py} -- \texttt{evaluate\_action()} i \texttt{aggregate\_evaluation()} za vrjednovanje akcija sustava nasuprot anotiranih oznaka nesreća iz DADA-2000
+\end{itemize}
+
+\begin{lstlisting}[style=pycode, caption={Procjena rizika i donošenje odluke}, label={lst:risk}]
+risk_estimator = RiskEstimator()
+
+# unutar glavne petlje:
+risks = risk_estimator.estimate_risk(
+    tracked, lane_output=lane_output,
+    context_state=ctx_state, frame_idx=frame_idx
+)
+action, intensity = decide(risks, context_state=ctx_state)
+\end{lstlisting}
+
+\subsection{Paket \texttt{dataset}}
+
+Paket \texttt{dataset} sadrži sve što je potrebno za rad s DADA-2000 skupom podataka. Sadrži sljedeće module:
+
+\begin{itemize}
+    \item \texttt{parser.py} -- parsiranje stabla direktorija, izgradnja iteratora okvira i dohvaćanje pojedinog okvira prema referenci; podržava sekvence slika i video datoteke
+    \item \texttt{indexer.py} -- izgradnja SQLite indeksa s tablicama \texttt{records} i \texttt{annotations} iz CSV anotacijske datoteke i direktorijske strukture; pisanje se odvija atomski kroz privremenu datoteku
+    \item \texttt{lotvs\_reader.py} -- čitač podataka specifičan za LOTVS/DADA format, uglavnom korišten od strane parsera
+    \item \texttt{annotation.py} -- pomoćne funkcije za dohvat i interpretaciju anotacijskih podataka pojedinog video zapisa (oznake okvira, intervali, kontekstni atributi)
+    \item \texttt{sampler.py} -- \texttt{random\_sample()} i \texttt{stratified\_sample()} funkcije za odabir uzoraka iz indeksa, s opcionalnim \textit{seed-om} pseudonasumičnog odabira
+    \item \texttt{loader\_wrappers.py} -- omotači koji kombiniraju dohvat iz indeksa s učitavanjem okvira u jednostavno iterabilno sučelje
+    \item \texttt{utils\_io.py} -- pomoćne I/O funkcije za atomsko zapisivanje datoteka i provjeru putanja
+\end{itemize}
+
+\subsection{Paket \texttt{scenario}}
+
+Paket \texttt{scenario} orkestrira cijeli pipeline za jednu snimku. Sadrži sljedeće module:
+
+\begin{itemize}
+    \item \texttt{runner.py} -- \texttt{run\_scenario()} funkcija koja inicijalizira sve module, puni RAM predmemoriju okvira, pokreće kontekstni servis u pozadinskoj dretvi i izvršava glavnu petlju obrade; podržava normalni i \textit{streaming} mod (pisanje sličica i JSON statusa na disk za live prikaz u UI-u)
+    \item \texttt{types.py} -- \texttt{ScenarioConfig} nepromjenjiva konfiguracija scenarija i \texttt{FrameResult} koji opisuje izlaz obrade jednog okvira
+    \item \texttt{events.py} -- \texttt{ScenarioEvent} i \texttt{log\_event()} za bilježenje značajnih događaja u JSONL datoteku
+\end{itemize}
+
+\subsection{Paket \texttt{ui}}
+
+Paket \texttt{ui} odgovoran je za sve što je vidljivo korisniku. Sadrži sljedeće module:
+
+\begin{itemize}
+    \item \texttt{master\_panel.py} -- glavni upravljački panel implementiran u Dear PyGui; objedinjuje tablicu zapisa iz dataseta, kartice za izgradnju indeksa, pokretanje scenarija, konfiguraciju parametara i live pregled videa
+    \item \texttt{backend\_cv2.py} -- \texttt{Cv2Player} koji koristi OpenCV \texttt{imshow} za interaktivni pregled, podržava tipkovničke naredbe za reprodukciju
+    \item \texttt{backend\_dpg.py} -- \texttt{DpgPlayer} koji koristi Dear PyGui za isti pregled unutar GPU-renderiranog prozora
+    \item \texttt{overlays.py} -- \texttt{draw\_lanes()}, \texttt{draw\_obstacles()} i \texttt{draw\_risk()} za iscrtavanje rezultata detekcije i procjene rizika izravno na okvir
+    \item \texttt{dashboard.py} -- \texttt{draw\_stats\_panel()} i \texttt{draw\_stats\_overlay()} za prikaz numeričkih metrika u uglu slike
+    \item \texttt{audio.py} -- \texttt{play\_warning\_beep()} i \texttt{play\_brake\_beep()} za zvučna upozorenja; koristi PulseAudio kada je dostupan
+    \item \texttt{player.py} -- generičke \texttt{create\_player()} i \texttt{run\_player\_loop()} funkcije koje apstrahiraju odabir između cv2 i dpg backenda
+    \item \texttt{types.py} -- \texttt{UIState} i \texttt{UICommand} tipovi za komunikaciju između loopa obrade i UI-a
+\end{itemize}
+
+\subsection{Paket \texttt{utils}}
+
+Paket \texttt{utils} sadrži male \textit{stateless} pomoćne funkcije. Modul \texttt{runtime\_overrides.py} implementira mehanizam kojim se numerički parametri konfiguracije mogu nadjačati u trenutku izvođenja bez mijenjanja izvornog koda: čita JSON datoteku \path{data/processed/runtime_overrides.json} i primjenjuje pronađene vrijednosti na zadani konfiguracijski dataclass. Ovaj mehanizam koriste svi konfiguracijski objekti u sustavu (\texttt{ContextConfig}, \texttt{DetectorConfig}, \texttt{EstimatorConfig}, \texttt{DecisionConfig}) pa je moguće podešavati parametre bez ponovnog pokretanja kontejnera. Isječak~\ref{lst:overrides} prikazuje strukturu te JSON datoteke.
+
+\begin{lstlisting}[style=bashcode, caption={Primjer runtime\_overrides.json datoteke s nadjačanim parametrima}, label={lst:overrides}]
+{
+  "context": { "context_interval": "30" },
+  "decision": { "brake_score_threshold": 0.65 },
+  "obstacle": { "min_area": 400.0, "mog2_var_threshold": 50.0 },
+  "lane":     { "hough_threshold": 35, "roi_top": 0.5 }
+}
+\end{lstlisting}
+
+\section{Testiranje}
+
+\subsection{Organizacija testova}
+
+Testovi su smješteni u direktorij \texttt{tests/} koji zrcali strukturu \texttt{src/adas/}: za svaki paket postoji odgovarajući poddirektorij s test modulima. Svi testovi koriste \textbf{pytest} okvir. Pokretanje svih testova svodi se na jednu naredbu:
+
+\begin{lstlisting}[style=bashcode, caption={Pokretanje testova}, label={lst:pytest}]
+poetry run pytest tests/
+# ili kraće:
+make test
+\end{lstlisting}
+
+\subsection{Testiranje bez stvarnog dataseta}
+
+Budući da DADA-2000 dataset nije dio repozitorija (velik je i preuzima se zasebno), testovi su dizajnirani tako da ne ovise o stvarnim video datotekama. Umjesto toga, za testove koji zahtijevaju slike koriste se sintetički okviri generirani NumPy-em. Primjerice, u direktoriju \texttt{tests/context/} postoji \texttt{conftest.py} koji definira \textit{pytest fixture-e}: crni okvir za simulaciju noći, bijeli okvir za simulaciju odsjaja, sivi okvir za uniformnu scenu, gradijentni okvir za umjerenu vidljivost i nasumično-šumni okvir za degradirane uvjete. Na taj se način svaki modul može testirati u izolaciji, bez ovisnosti o vanjskim podacima.
+
+Za testove koji trebaju SQLite indeks (primjerice \texttt{test\_indexer.py} ili \texttt{test\_sampler.py}), indeks se gradi u privremenoj memorijskoj bazi (\texttt{:memory:}) ili u privremenom direktoriju koji pytest automatski uklanja nakon testa.
+
+\subsection{Testiranje scenarija}
+
+Test modul \texttt{tests/scenario/test\_runner.py} provjerava ponašanje \texttt{run\_scenario()} funkcije bez potrebe za stvarnim videopodacima ili grafičkim sučeljem. Koristi \texttt{unittest.mock} za zamjenu poziva koji bi zahtijevali GUI ili dataset, čime se potvrđuju konfiguracijski tipovi, logika događaja i ponašanje \texttt{ScenarioConfig} i \texttt{FrameResult} dataklasa.
+
+\subsection{Evaluacijske metrike}
+
+Paketi \texttt{collision\_risk}, \texttt{obstacle\_detection} i \texttt{lane\_detection} svaki imaju vlastiti modul \texttt{metrics.py} koji implementira funkcije za ocjenjivanje rezultata nasuprot referentnih anotacija. Za procjenu rizika i odlučivanja (\texttt{collision\_risk/metrics.py}) definirani su standardni pokazatelji klasifikacije: preciznost, odziv, F1-mjera i stopa lažnih alarma, računati usporedbom akcija sustava s oznakama akcidentalnih okvira iz DADA-2000 anotacija. Ovakav pristup omogućuje kvantitativnu provjeru ponašanja sustava na scenarijima za koje postoje referentne oznake.
+
+\section{Olakšani pristup --- skripte i ulazna točka}
+
+\subsection{Skripte u direktoriju \texttt{scripts/}}
+
+Direktorij \texttt{scripts/} sadrži skripte koje olakšavaju najčešće zadatke pri radu s projektom. Svaka skripta je samostalna i poziva se iz korijenskog direktorija projekta (u Dockeru je to \texttt{/app}).
+
+\textbf{\texttt{scripts/run\_scenario.py}} je glavna CLI ulazna točka za pokretanje cijelog ADAS pipeline-a nad jednim video zapisom iz dataseta. Prima argumente za odabir kategorije i video ID-a, odabir UI backenda, broj okvira, interval kontekstne analize i opcijsko isključivanje audio upozorenja. Podržava i posebni \textit{streaming} mod u kojemu svaki okvir zapisuje sličicu i JSON statusnu datoteku na disk, što koristi master panel za live prikaz bez direktnog X11 prozora.
+
+\begin{lstlisting}[style=bashcode, caption={Pokretanje scenarija iz naredbenog retka}, label={lst:run_scenario}]
+python scripts/run_scenario.py --category-id 1 --video-id 3
+python scripts/run_scenario.py --category-id 2 --video-id 1 --no-audio --ui-backend cv2
+\end{lstlisting}
+
+\textbf{\texttt{scripts/debug\_lanes.py}} prikazuje samo rezultate detekcije traka (Canny rubovi, namješteni polinomi, maska trake) bez pokretanja detekcije prepreka ili procjene rizika. Koristan je pri podešavanju parametara lane detectiona.
+
+\begin{lstlisting}[style=bashcode, caption={Debug vizualizacija detekcije traka}, label={lst:debug_lanes}]
+python scripts/debug_lanes.py --category-id 1 --video-id 1 --show-edges
+\end{lstlisting}
+
+\textbf{\texttt{scripts/debug\_obstacles.py}} na sličan način prikazuje samo detekciju i praćenje prepreka. Opcionalnim argumentom \texttt{--with-lanes} moguće je dodati i vizualizaciju traka.
+
+\begin{lstlisting}[style=bashcode, caption={Debug vizualizacija detekcije prepreka}, label={lst:debug_obs}]
+python scripts/debug_obstacles.py --category-id 1 --video-id 1 --with-lanes
+\end{lstlisting}
+
+Poddirektorij \texttt{scripts/dataset/} sadrži skripte za upravljanje datasetom:
+\begin{itemize}
+    \item \texttt{build\_index.py} -- gradi SQLite indeks iz CSV anotacija i strukture direktorija
+    \item \texttt{download\_dataset.py} -- preuzimanje DADA-2000 dataset datoteka (potencijalni problemi zbog veličine dataseta od 100+GB)
+    \item \texttt{play\_index\_video.py} -- pregled pojedinog videa iz indeksa s prikazom anotacijskih oznaka okvira
+    \item \texttt{export\_samples.py} -- izvoz odabranih uzoraka okvira na disk
+    \item \texttt{sample\_conditions.py} -- uzorkovanje zapisa prema uvjetima (vremenski uvjeti, scenarij, dan/noć)
+    \item \texttt{run\_parser.py} -- ručno pokretanje parsera za provjeru ispravnosti čitanja video izvora
+    \item \texttt{upload\_dataset.py} -- pomoćna skripta za prijenos podataka (isti potencijalni problem kao i sa preuzimanjem)
+\end{itemize}
+
+Direktorij \texttt{scripts/context/} sadrži \texttt{analyze\_video.py} koji pokreće samo kontekstnu analizu nad odabranim videom i ispisuje metrike vidljivosti, stanje podloge i promjene modova okvir po okvir, bez pokretanja ostatka pipeline-a.
+
+\subsection{Ulazna točka \texttt{main.py}}
+
+Datoteka \texttt{main.py} u korijenu projekta je najjednostavniji način pokretanja cijelog sustava. Ona dodaje \texttt{src/} na Python putanju i poziva \texttt{run\_master\_dashboard()} koji otvara glavni Dear PyGui prozor.
+
+\begin{lstlisting}[style=bashcode, caption={Pokretanje glavnog sučelja}, label={lst:main}]
+python main.py
+\end{lstlisting}
+
+\section{Korisničko sučelje}
+
+\subsection{Arhitektura sučelja}
+
+Korisničko sučelje organizirano je u dva sloja. Vanjski sloj je \textbf{master panel} (\path{ui/master_panel.py}) koji se pokreće na hostu (ili unutar kontejnera s X11 prosljeđivanjem) i pruža kompletno grafičko okruženje za upravljanje projektom. Unutarnji sloj je \textbf{player prozor} koji se otvara za vrijeme reprodukcije scenarija i prikazuje obradu okvira s ucrtanim rezultatima detekcije. Ova dva sloja komuniciraju putem \textit{streaming} mehanizma: scenario runner upisuje sličice i statusne JSON datoteke na disk, a master panel ih periodički čita i prikazuje.
+
+\subsection{Master panel}
+
+Master panel izgrađen u Dear PyGui-u otvara se pokretanjem \texttt{main.py} i predstavlja jedinu ulaznu točku za većinu korisničkih radnji. Prozor je organiziran u nekoliko kartica:
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\linewidth]{ui_master_panel.png}
+    \caption{Glavni upravljački panel (\textit{Master Dashboard}) s tablicom zapisa dataseta.}
+    \label{fig:master_panel}
+\end{figure}
+
+\textbf{Kartica s tablicom zapisa} prikazuje sve zapise iz SQLite indeksa u straničenoj tablici s do 200 redaka po stranici. Svaki redak prikazuje category ID, video ID, broj okvira, putanju i anotacijske atribute (vremenske uvjete, tip scene i slično). Tablica podržava sortiranje po stupcima klikom na zaglavlje, filtriranje prema numeričkim i tekstualnim vrijednostima te odabir retka za pokretanje scenarija.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\linewidth]{ui_tablica_filteri.png}
+    \caption{Filtriranje i sortiranje tablice zapisa prema atributima anotacija.}
+    \label{fig:ui_filteri}
+\end{figure}
+
+\textbf{Kartica Build Index} omogućuje izgradnju SQLite indeksa izravno iz sučelja, bez ručnog pokretanja skripte iz terminala. Prikazuje log izlaz procesa u realnom vremenu.
+
+\textbf{Kartica Run Scenario} pruža formu za odabir parametara scenarija (category ID, video ID, FPS, interval kontekstne analize) i gumb za pokretanje. Scenarij se pokreće kao zasebni subprocess unutar kontejnera, a izlaz se struja u panel.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\linewidth]{ui_run_scenario.png}
+    \caption{Kartica za pokretanje scenarija s odabranim parametrima i prikazom loga.}
+    \label{fig:ui_run_scenario}
+\end{figure}
+
+\textbf{Kartica Configurator} prikazuje live sličicu aktivnog scenarija zajedno s numeričkim statusom (trenutni mod, vidljivost, stanje traka, zadnja akcija). Ovo je koristan prikaz za praćenje ponašanja sustava u stvarnom vremenu bez potrebe za X11 prozorom.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\linewidth]{ui_configurator.png}
+    \caption{Kartica Configurator s live pregledom okvira i numeričkim statusom sustava.}
+    \label{fig:ui_configurator}
+\end{figure}
+
+\textbf{Kartica Runtime Overrides} prikazuje i omogućuje uređivanje JSON datoteke s parametrima koji se nadjačavaju u izvođenju. Promjene se primjenjuju za sljedeće pokretanje scenarija bez potrebe za rekompilacijom ili ponovnim pokretanjem kontejnera.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\linewidth]{ui_overrides.png}
+    \caption{Kartica Runtime Overrides za podešavanje parametara sustava bez ponovnog pokretanja.}
+    \label{fig:ui_overrides}
+\end{figure}
+
+\subsection{Player prozor}
+
+Kada se scenarij pokreće s UI backendom \texttt{cv2} ili \texttt{dpg}, otvara se zasebni player prozor koji prikazuje video u stvarnom vremenu s ucrtanim rezultatima obrade. Na svakom okviru vidljivi su:
+
+\begin{itemize}
+    \item ucrtane granice prometnih traka (polinomske krivulje lijeve i desne trake)
+    \item omeđujući pravokutnici detektiranih i praćenih prepreka s ispisanim identifikatorima i procijenjenom udaljenošću
+    \item boja pravokutnika označava razinu rizika: zelena za NONE, žuta za WARN, crvena za BRAKE
+    \item informacijska traka s trenutnim modom sustava, ocjenom vidljivosti i oznakom anotacijskog stanja okvira (normal / abnormal / accident\_frame)
+\end{itemize}

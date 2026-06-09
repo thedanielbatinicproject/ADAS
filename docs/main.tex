@@ -16,6 +16,47 @@
 \usepackage{float}
 \usepackage{tikz}
 
+% Code blocks
+\usepackage{listings}
+\usepackage{xcolor}
+\renewcommand{\lstlistingname}{Isječak}
+\renewcommand{\lstlistlistingname}{Popis isječaka koda}
+\lstset{
+    literate=
+      {č}{{\v{c}}}1 {Č}{{\v{C}}}1
+      {ć}{{\'c}}1  {Ć}{{\'C}}1
+      {š}{{\v{s}}}1 {Š}{{\v{S}}}1
+      {ž}{{\v{z}}}1 {Ž}{{\v{Z}}}1
+      {đ}{{\dj}}1  {Đ}{{\DJ}}1
+      {ô}{{\^o}}1  {â}{{\^a}}1
+}
+\lstdefinestyle{pycode}{
+    language=Python,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue}\bfseries,
+    commentstyle=\color{gray}\itshape,
+    stringstyle=\color{teal},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    numbersep=8pt,
+    frame=single,
+    breaklines=true,
+    captionpos=b,
+    showstringspaces=false,
+    tabsize=4,
+}
+\lstdefinestyle{bashcode}{
+    language=bash,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{brown}\bfseries,
+    commentstyle=\color{gray}\itshape,
+    numbers=none,
+    frame=single,
+    breaklines=true,
+    captionpos=b,
+    showstringspaces=false,
+}
+
 % Math
 \usepackage{amsmath}
 \usepackage{amssymb}
@@ -23,10 +64,6 @@
 % Tables
 \usepackage{booktabs}
 \usepackage{tabularx}
-
-% Code listings
-\usepackage{listings}
-\usepackage{xcolor}
 
 % References and links
 \usepackage{hyperref}
@@ -137,6 +174,18 @@
 % Sadržaj
 \newpage
 \tableofcontents
+
+% Popis slika
+\listoffigures
+\addcontentsline{toc}{chapter}{\listfigurename}
+
+% Popis tablica
+\listoftables
+\addcontentsline{toc}{chapter}{\listtablename}
+
+% Popis isječaka kôda
+\lstlistoflistings
+\addcontentsline{toc}{chapter}{\lstlistlistingname}
 
 % Arapski brojevi od prvog poglavlja
 \clearpage
