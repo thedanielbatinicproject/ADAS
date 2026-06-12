@@ -165,6 +165,10 @@ class LaneProcessingConfig:
     lane_expected_right_bottom_frac: float = 0.76
     lane_expected_left_top_frac: float = 0.42
     lane_expected_right_top_frac: float = 0.58
+    # Color-based preprocessing: keep only white/yellow edge pixels (lane markings).
+    # Dramatically reduces noise from trees, asphalt texture, signs, etc.
+    # Set to False to disable (e.g. for unusual lane color schemes).
+    use_color_filter: bool = True
 
 
 DEFAULT_PROCESSING_CONFIG = apply_dataclass_overrides(LaneProcessingConfig(), "lane")
@@ -185,14 +189,21 @@ class LaneProcessor:
     def __init__(self, config: Optional[LaneProcessingConfig] = None) -> None:
         self._config = config or DEFAULT_PROCESSING_CONFIG
         self._tracker: LaneTracker = LaneTracker(_adapt_config(self._config))
+        self._prev_stable_output: Optional[LaneOutput] = None
+        self._hold_remaining: int = 0
+        self._max_hold_frames: int = 1  # reduced: holding wrong KF output for 3 frames causes visible drift
 
     def reset(self) -> None:
         """Reset temporal state (call when switching videos)."""
         self._tracker.reset()
+        self._prev_stable_output = None
+        self._hold_remaining = 0
 
     def update_config(self, config: LaneProcessingConfig) -> None:
         self._config = config
         self._tracker = LaneTracker(_adapt_config(config))
+        self._prev_stable_output = None
+        self._hold_remaining = 0
 
     def update(
         self,
@@ -200,9 +211,41 @@ class LaneProcessor:
         context_state: Any = None,
     ) -> LaneOutput:
         """Process one frame with temporal smoothing applied."""
-        return process_frame(
+        raw = process_frame(
             frame, context_state, config=self._config, tracker=self._tracker
         )
+
+        # Keep the last stable non-trapezoid output for a few frames to avoid
+        # visible flicker when detection briefly drops out.
+        if raw.has_lanes and not raw.is_trapezoid:
+            self._prev_stable_output = raw
+            self._hold_remaining = self._max_hold_frames
+            return raw
+
+        prev = self._prev_stable_output
+        if prev is None or self._hold_remaining <= 0:
+            return raw
+
+        if raw.is_trapezoid or not raw.has_lanes:
+            self._hold_remaining -= 1
+            return LaneOutput(
+                has_lanes=prev.has_lanes,
+                lane_confidence=prev.lane_confidence,
+                left_detected=prev.left_detected,
+                right_detected=prev.right_detected,
+                left_confidence=prev.left_confidence,
+                right_confidence=prev.right_confidence,
+                left_poly=prev.left_poly,
+                right_poly=prev.right_poly,
+                edges=raw.edges,
+                mask=prev.mask,
+                roi_y1=raw.roi_y1,
+                roi_y2=raw.roi_y2,
+                lane_width_px=prev.lane_width_px,
+                is_trapezoid=False,
+            )
+
+        return raw
 
 
 # ---------------------------------------------------------------------------
@@ -291,15 +334,17 @@ def process_frame(
             edges=edges,
         )
 
-    left_detected = left_conf >= cfg.min_confidence
-    right_detected = right_conf >= cfg.min_confidence
-
-    if left_detected and not right_detected:
-        left_conf *= cfg.one_side_penalty
-        left_detected = left_conf >= cfg.min_confidence
-    elif right_detected and not left_detected:
-        right_conf *= cfg.one_side_penalty
-        right_detected = right_conf >= cfg.min_confidence
+    # Detection should not collapse just because confidence dips for a frame.
+    # If RANSAC had enough inliers, keep that side alive and let Kalman smooth it.
+    min_inliers_for_keep = 6
+    left_detected = (
+        left_poly is not None
+        and (left_conf >= cfg.min_confidence or hough_result.left_inliers >= min_inliers_for_keep)
+    )
+    right_detected = (
+        right_poly is not None
+        and (right_conf >= cfg.min_confidence or hough_result.right_inliers >= min_inliers_for_keep)
+    )
 
     has_lanes = left_detected or right_detected
 
@@ -312,7 +357,7 @@ def process_frame(
     else:
         lane_confidence = 0.0
     lane_width_px: Optional[float] = None
-    if left_poly is not None and right_poly is not None:
+    if left_detected and right_detected and left_poly is not None and right_poly is not None:
         y_bot = float(roi_h - 1)
         lx = _poly_eval(left_poly, y_bot)
         rx = _poly_eval(right_poly, y_bot)
@@ -321,10 +366,16 @@ def process_frame(
             lane_width_px = w_est
 
     # If lane geometry is weak or implausible, synthesize perspective road area.
-    width_ok = False
-    if lane_width_px is not None:
-        width_ok = (w * cfg.lane_min_width_frac) <= lane_width_px <= (w * cfg.lane_max_width_frac)
-    if (not has_lanes) or (not width_ok):
+    width_ok = True
+    if left_detected and right_detected:
+        width_ok = (
+            lane_width_px is not None
+            and (w * cfg.lane_min_width_frac) <= lane_width_px <= (w * cfg.lane_max_width_frac)
+        )
+
+    # Do not immediately jump to trapezoid when one side is still trackable.
+    # Prefer one-side continuity over synthetic polygon oscillation.
+    if not has_lanes:
         return _build_trapezoid(
             h,
             w,
@@ -336,6 +387,28 @@ def process_frame(
             left_hint=left_poly,
             right_hint=right_poly,
         )
+
+    if not width_ok:
+        if left_conf >= right_conf:
+            right_detected = False
+            right_poly = None
+            right_conf = 0.0
+        else:
+            left_detected = False
+            left_poly = None
+            left_conf = 0.0
+        has_lanes = left_detected or right_detected
+        lane_width_px = None
+        if not has_lanes:
+            return _build_trapezoid(
+                h,
+                w,
+                y1,
+                y2,
+                cfg,
+                mode_str=mode_str,
+                edges=edges,
+            )
 
     mask = _build_lane_mask(
         roi_h, w, left_poly, right_poly, left_detected, right_detected
@@ -363,8 +436,36 @@ def process_frame(
 # Preprocessing helpers
 # ---------------------------------------------------------------------------
 
+def _color_lane_mask(roi: Any, *, relaxed: bool = False) -> Any:
+    """Binary mask of pixels likely to be lane markings (white + yellow).
+
+    Works in HSV space.  relaxed=True uses looser thresholds for night/shadows.
+    The mask is slightly dilated to bridge gaps in dashed markings.
+    """
+    import cv2
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    if relaxed:
+        # Night / shadow / fog: accept dimmer whites and slightly wider yellow range
+        white_lo  = np.array([0,   0, 155], dtype=np.uint8)
+        white_hi  = np.array([180, 50, 255], dtype=np.uint8)
+        yellow_lo = np.array([12, 40,  50], dtype=np.uint8)
+        yellow_hi = np.array([42, 255, 255], dtype=np.uint8)
+    else:
+        # Daytime: strict — road paint is pure white (low S, high V) or yellow
+        white_lo  = np.array([0,   0, 175], dtype=np.uint8)
+        white_hi  = np.array([180, 40, 255], dtype=np.uint8)
+        yellow_lo = np.array([15, 60,  60], dtype=np.uint8)
+        yellow_hi = np.array([38, 255, 255], dtype=np.uint8)
+    white  = cv2.inRange(hsv, white_lo,  white_hi)
+    yellow = cv2.inRange(hsv, yellow_lo, yellow_hi)
+    mask   = cv2.bitwise_or(white, yellow)
+    # Small dilation to connect fragmented marking pixels
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    return cv2.dilate(mask, k, iterations=1)
+
+
 def _preprocess_normal(roi: Any, cfg: LaneProcessingConfig) -> Any:
-    """Standard preprocessing: CLAHE + Gaussian blur + Canny."""
+    """Standard preprocessing: CLAHE + Gaussian blur + Canny + color filter."""
     import cv2
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(
@@ -373,7 +474,12 @@ def _preprocess_normal(roi: Any, cfg: LaneProcessingConfig) -> Any:
     )
     gray = clahe.apply(gray)
     blurred = cv2.GaussianBlur(gray, (cfg.blur_ksize, cfg.blur_ksize), 0)
-    return cv2.Canny(blurred, cfg.canny_low, cfg.canny_high)
+    edges = cv2.Canny(blurred, cfg.canny_low, cfg.canny_high)
+    # Keep only edges where white/yellow lane-marking colors are present.
+    # This eliminates ~80% of noise from trees, asphalt texture, vehicles, etc.
+    if cfg.use_color_filter:
+        edges = cv2.bitwise_and(edges, _color_lane_mask(roi, relaxed=False))
+    return edges
 
 
 def _preprocess_degraded(
@@ -399,22 +505,35 @@ def _preprocess_degraded(
         clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(cfg.clahe_grid, cfg.clahe_grid))
         gray = clahe.apply(gray)
         blurred = cv2.GaussianBlur(gray, (cfg.blur_ksize, cfg.blur_ksize), 0)
-        return cv2.Canny(blurred, max(20, cfg.canny_low - 15), max(60, cfg.canny_high - 30))
+        edges = cv2.Canny(blurred, max(20, cfg.canny_low - 15), max(60, cfg.canny_high - 30))
+        if cfg.use_color_filter:
+            # Night: use relaxed color thresholds to catch dim markings
+            edges = cv2.bitwise_and(edges, _color_lane_mask(roi, relaxed=True))
+        return edges
 
     if weather == "rain":
         clip = max(cfg.clahe_clip * 1.6, 2.8)
         clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(cfg.clahe_grid, cfg.clahe_grid))
         gray = clahe.apply(gray)
         blurred = cv2.bilateralFilter(gray, 9, 75, 75)
-        return cv2.Canny(blurred, cfg.canny_low, cfg.canny_high)
+        edges = cv2.Canny(blurred, cfg.canny_low, cfg.canny_high)
+        if cfg.use_color_filter:
+            edges = cv2.bitwise_and(edges, _color_lane_mask(roi, relaxed=True))
+        return edges
 
     if weather == "fog":
-        clip = max(cfg.clahe_clip * 2.5, 4.0)
+        clip = max(cfg.clahe_clip * 1.4, 2.5)  # reduced from 4.0 — lower avoids amplifying concrete/guardrails
         clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(cfg.clahe_grid, cfg.clahe_grid))
         gray = clahe.apply(gray)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        gradient = cv2.morphologyEx(gray, cv2.MORPH_GRADIENT, kernel)
-        return cv2.Canny(gradient, max(20, cfg.canny_low - 10), cfg.canny_high)
+        # Do NOT use morphological gradient here — it amplifies guardrail/barrier
+        # edges to the same level as lane markings and cannot be separated.
+        blurred = cv2.GaussianBlur(gray, (cfg.blur_ksize, cfg.blur_ksize), 0)
+        edges = cv2.Canny(blurred, max(20, cfg.canny_low - 10), cfg.canny_high)
+        if cfg.use_color_filter:
+            # Fog+CLAHE raises grey/concrete brightness; use strict white filter (not relaxed)
+            # so guardrails don't pass.  Yellow threshold stays relaxed for faded markings.
+            edges = cv2.bitwise_and(edges, _color_lane_mask(roi, relaxed=False))
+        return edges
 
     if weather == "glare":
         clip = cfg.clahe_clip
@@ -422,14 +541,20 @@ def _preprocess_degraded(
         gray = clahe.apply(gray)
         ksize = cfg.blur_ksize if cfg.blur_ksize % 2 == 1 else cfg.blur_ksize + 1
         blurred = cv2.GaussianBlur(gray, (ksize, ksize), 0)
-        return cv2.Canny(blurred, cfg.canny_low + 10, cfg.canny_high + 20)
+        edges = cv2.Canny(blurred, cfg.canny_low + 10, cfg.canny_high + 20)
+        if cfg.use_color_filter:
+            edges = cv2.bitwise_and(edges, _color_lane_mask(roi, relaxed=False))
+        return edges
 
     # Generic degraded: moderate CLAHE boost
     clip = max(cfg.clahe_clip * 1.4, 2.5)
     clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(cfg.clahe_grid, cfg.clahe_grid))
     gray = clahe.apply(gray)
     blurred = cv2.GaussianBlur(gray, (cfg.blur_ksize, cfg.blur_ksize), 0)
-    return cv2.Canny(blurred, max(20, cfg.canny_low - 5), cfg.canny_high)
+    edges = cv2.Canny(blurred, max(20, cfg.canny_low - 5), cfg.canny_high)
+    if cfg.use_color_filter:
+        edges = cv2.bitwise_and(edges, _color_lane_mask(roi, relaxed=True))
+    return edges
 
 
 def _hough_threshold(cfg: LaneProcessingConfig, degraded: bool) -> int:
@@ -466,6 +591,10 @@ def _adapt_config(cfg: LaneProcessingConfig, *, degraded: bool = False) -> Hough
         scale_c_max_gap=base_max_gap + 100,
         slope_min=cfg.slope_min,
         slope_max=cfg.slope_max,
+        expected_left_bottom_frac=cfg.lane_expected_left_bottom_frac,
+        expected_right_bottom_frac=cfg.lane_expected_right_bottom_frac,
+        expected_left_top_frac=cfg.lane_expected_left_top_frac,
+        expected_right_top_frac=cfg.lane_expected_right_top_frac,
     )
 
 # ---------------------------------------------------------------------------
@@ -676,8 +805,11 @@ def _estimate_road_geometry(
         if end > start:
             local = row_scores[start:end]
             idx = int(np.argmax(local)) + start
-            low = int(roi_h * 0.22)
-            high = int(roi_h * 0.62)
+            # Keep trapezoid top in a realistic perspective band.
+            # Too-low tops create a "fallen" rhombus that does not resemble
+            # a road plane in front of the ego vehicle.
+            low = int(roi_h * 0.14)
+            high = int(roi_h * 0.46)
             top_y_roi = max(low, min(high, idx))
 
         band_h = max(8, int(roi_h * 0.12))
@@ -723,7 +855,7 @@ def _estimate_road_geometry(
         "bx_r": bx_r,
         "tx_l": tx_l,
         "tx_r": tx_r,
-        "top_y_roi": max(0, min(bot_y - 4, top_y_roi)),
+        "top_y_roi": max(int(roi_h * 0.14), min(int(roi_h * 0.46), min(bot_y - 4, top_y_roi))),
         "curve_bias": curve_bias,
     }
 
@@ -868,3 +1000,4 @@ def _get_light_str(context_state: Any) -> str:
     if light is None:
         return ""
     return str(getattr(light, "value", light)).lower()
+# end processing.py

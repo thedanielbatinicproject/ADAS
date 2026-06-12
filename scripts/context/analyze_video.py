@@ -967,10 +967,14 @@ def main() -> int:
         help="Path to index.db (default: data/processed/index.db)",
     )
     p.add_argument(
-        "--category-id", type=int, required=True, help="Category (folder number)"
+        "--category-id", type=int, required=False, default=0, help="Category (folder number)"
     )
     p.add_argument(
-        "--video-id", type=int, required=True, help="Video ID within category"
+        "--video-id", type=int, required=False, default=0, help="Video ID within category"
+    )
+    p.add_argument(
+        "--image-dir", default=None,
+        help="Use this image folder directly instead of looking up the index.",
     )
     p.add_argument(
         "--every-n",
@@ -1020,44 +1024,57 @@ def main() -> int:
     args = p.parse_args()
 
     # ── Validate paths ──────────────────────────────────────────────────
-    if not os.path.exists(args.index_path):
-        print(_c(f"[ERROR] Index not found: {args.index_path}", C_RED))
-        print(
-            "  Run:  python scripts/dataset/build_index.py "
-            "--dataset-root data/raw/DADA2000"
-        )
-        return 1
-
-    # ── Find record ─────────────────────────────────────────────────────
-    records = get_records_by_key(args.index_path, args.category_id, args.video_id)
-    if not records:
-        print(
-            _c(
-                f"[ERROR] No records for category_id={args.category_id}, "
-                f"video_id={args.video_id}",
-                C_RED,
+    if args.image_dir:
+        image_dir_abs = args.image_dir if os.path.isabs(args.image_dir) else os.path.join(PROJECT_ROOT, args.image_dir)
+        if not os.path.isdir(image_dir_abs):
+            print(_c(f"[ERROR] --image-dir not found: {image_dir_abs}", C_RED))
+            return 1
+        all_frames: List[Tuple[int, Any]] = list(parser.iter_frames(image_dir_abs))
+        total = len(all_frames)
+        if total == 0:
+            print(_c("[ERROR] No frames found in --image-dir.", C_RED))
+            return 1
+        annotation = None
+        print(_c(f"[INFO] INPUT OVERRIDE: {total} frames from {image_dir_abs}", C_CYAN))
+    else:
+        if not os.path.exists(args.index_path):
+            print(_c(f"[ERROR] Index not found: {args.index_path}", C_RED))
+            print(
+                "  Run:  python scripts/dataset/build_index.py "
+                "--dataset-root data/raw/DADA2000"
             )
-        )
-        return 1
+            return 1
 
-    record = pick_record(records, args.record_type)
-    rec_path = record["path"]
-    print(_c(f"Record : {record['record_id']}", C_CYAN))
-    print(_c(f"Path   : {rec_path}", C_DIM))
+        # ── Find record ─────────────────────────────────────────────────────
+        records = get_records_by_key(args.index_path, args.category_id, args.video_id)
+        if not records:
+            print(
+                _c(
+                    f"[ERROR] No records for category_id={args.category_id}, "
+                    f"video_id={args.video_id}",
+                    C_RED,
+                )
+            )
+            return 1
 
-    if not os.path.exists(rec_path):
-        print(_c(f"[ERROR] Record path does not exist: {rec_path}", C_RED))
-        return 1
+        record = pick_record(records, args.record_type)
+        rec_path = record["path"]
+        print(_c(f"Record : {record['record_id']}", C_CYAN))
+        print(_c(f"Path   : {rec_path}", C_DIM))
 
-    # ── Enumerate frames ────────────────────────────────────────────────
-    print(_c("[INFO] Loading frame list...", C_GREEN), flush=True)
-    all_frames: List[Tuple[int, Any]] = list(parser.iter_frames(rec_path))
-    total = len(all_frames)
-    if total == 0:
-        print(_c("[ERROR] No frames found in record.", C_RED))
-        return 1
+        if not os.path.exists(rec_path):
+            print(_c(f"[ERROR] Record path does not exist: {rec_path}", C_RED))
+            return 1
 
-    print(_c(f"[INFO] {total} frames, analysing every {args.every_n}-th", C_GREEN))
+        # ── Enumerate frames ────────────────────────────────────────────────
+        print(_c("[INFO] Loading frame list...", C_GREEN), flush=True)
+        all_frames: List[Tuple[int, Any]] = list(parser.iter_frames(rec_path))
+        total = len(all_frames)
+        if total == 0:
+            print(_c("[ERROR] No frames found in record.", C_RED))
+            return 1
+        annotation = get_annotation_by_key(args.index_path, args.category_id, args.video_id)
+        print(_c(f"[INFO] {total} frames, analysing every {args.every_n}-th", C_GREEN))
 
     # ── GUI or terminal mode ────────────────────────────────────────────
     if args.gui:

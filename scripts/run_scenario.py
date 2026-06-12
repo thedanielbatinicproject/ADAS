@@ -33,8 +33,9 @@ def _ensure_src_on_path() -> None:
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Run an ADAS scenario")
-    p.add_argument("--category-id", type=int, required=True)
-    p.add_argument("--video-id", type=int, required=True)
+    p.add_argument("--category-id", type=int, default=0)
+    p.add_argument("--video-id", type=int, default=0)
+    p.add_argument("--image-dir", default=None, help="Use a pre-extracted image folder instead of the dataset index (custom video override)")
     p.add_argument("--dataset-root", default="data/raw/DADA2000")
     p.add_argument("--index-path", default="data/processed/index.db")
     p.add_argument("--ui-backend", default="dpg", choices=["dpg", "cv2", "none"])
@@ -80,34 +81,40 @@ def _run_streaming(args: argparse.Namespace) -> None:
     status_path = os.path.join(stream_dir, "status.json")
     tmp_path = os.path.join(stream_dir, ".latest_tmp.jpg")
 
-    # --- Load record --------------------------------------------------
-    import sqlite3
-    index_path = args.index_path
-    if not os.path.exists(index_path):
-        print(f"[ERROR] index not found: {index_path}", flush=True)
-        return
-    conn = sqlite3.connect(index_path)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT * FROM records WHERE category_id = ? AND video_id = ? LIMIT 1",
-        (args.category_id, args.video_id),
-    )
-    row = cur.fetchone()
-    conn.close()
-    if row is None:
-        print(f"[ERROR] record not found cat={args.category_id} vid={args.video_id}", flush=True)
-        return
-    record = dict(row)
-    record_path = record["path"]
+    # --- Load record (or use --image-dir override) ---------------------
+    if args.image_dir:
+        record_path = os.path.normpath(args.image_dir)
+        if not os.path.isdir(record_path):
+            print(f"[ERROR] image-dir not found: {record_path}", flush=True)
+            return
+    else:
+        import sqlite3
+        index_path = args.index_path
+        if not os.path.exists(index_path):
+            print(f"[ERROR] index not found: {index_path}", flush=True)
+            return
+        conn = sqlite3.connect(index_path)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM records WHERE category_id = ? AND video_id = ? LIMIT 1",
+            (args.category_id, args.video_id),
+        )
+        row = cur.fetchone()
+        conn.close()
+        if row is None:
+            print(f"[ERROR] record not found cat={args.category_id} vid={args.video_id}", flush=True)
+            return
+        record = dict(row)
+        record_path = record["path"]
 
-    # Prefer images/ sibling when a non-image folder is referenced
-    norm = os.path.normpath(record_path)
-    base = os.path.basename(norm).lower()
-    if base in {"fixation", "maps", "seg", "semantic"}:
-        candidate = os.path.join(os.path.dirname(norm), "images")
-        if os.path.isdir(candidate):
-            record_path = candidate
+        # Prefer images/ sibling when a non-image folder is referenced
+        norm = os.path.normpath(record_path)
+        base = os.path.basename(norm).lower()
+        if base in {"fixation", "maps", "seg", "semantic"}:
+            candidate = os.path.join(os.path.dirname(norm), "images")
+            if os.path.isdir(candidate):
+                record_path = candidate
 
     # --- Build frame list ---------------------------------------------
     raw_iter = parser.iter_frames(record_path)
@@ -137,7 +144,7 @@ def _run_streaming(args: argparse.Namespace) -> None:
         img = parser.get_frame(_fr)
         if img is not None:
             frame_cache[ci] = img
-        if (ci + 1) % 50 == 0 or ci + 1 == n_frames:
+        if (ci + 1) % 100 == 0 or ci + 1 == n_frames:
             pct = 100.0 * (ci + 1) / n_frames
             print(f"\r[cache] {ci + 1}/{n_frames} ({pct:.0f}%)", end="", file=sys.stderr, flush=True)
     if n_frames > 0:
@@ -150,15 +157,17 @@ def _run_streaming(args: argparse.Namespace) -> None:
     detector = Detector()
     tracker = SimpleTracker()
     risk_estimator = RiskEstimator()
-
-    target_spf = (1.0 / args.target_fps) if args.target_fps > 0 else 0.0
-    log_every = max(1, args.log_every) if args.log_every > 0 else 1
-
-    iteration = 0
-    prev_overrides: dict = {}
-    control_path = os.path.join(stream_dir, "control.json")
-    paused = False
-    need_rerender = False  # True when step/param change needs a fresh render while paused
+    action_state = {
+        "stable": SystemAction.NONE,
+        "pending": SystemAction.NONE,
+        "pending_count": 0,
+        "stable_intensity": 0.0,
+        "last_warn_frame": -999,
+        "last_brake_frame": -999,
+        "cooldown": 30,
+        "prev_cursor": -1,
+        "prev_cursor": -1,
+    }
     try:
         while True:
             cursor = 0
@@ -217,7 +226,8 @@ def _run_streaming(args: argparse.Namespace) -> None:
                         _render_frame(cursor, frame_items, frame_cache, args, lane_processor,
                                       detector, tracker, risk_estimator, ctx_service, decide,
                                       draw_lanes, draw_obstacles, draw_risk, cv2,
-                                      tmp_path, latest_path, status_path, iteration, n_frames, log_every)
+                                      tmp_path, latest_path, status_path, iteration, n_frames, log_every,
+                                      action_state)
                         need_rerender = False
                     continue
 
@@ -228,7 +238,8 @@ def _run_streaming(args: argparse.Namespace) -> None:
                 _render_frame(cursor, frame_items, frame_cache, args, lane_processor,
                               detector, tracker, risk_estimator, ctx_service, decide,
                               draw_lanes, draw_obstacles, draw_risk, cv2,
-                              tmp_path, latest_path, status_path, iteration, n_frames, log_every)
+                              tmp_path, latest_path, status_path, iteration, n_frames, log_every,
+                              action_state)
 
                 elapsed = time.monotonic() - t0
                 if target_spf > 0 and elapsed < target_spf:
@@ -243,6 +254,16 @@ def _run_streaming(args: argparse.Namespace) -> None:
             lane_processor.reset()
             tracker = SimpleTracker()
             risk_estimator = RiskEstimator()
+            action_state = {
+                "stable": SystemAction.NONE,
+                "pending": SystemAction.NONE,
+                "pending_count": 0,
+                "stable_intensity": 0.0,
+                "last_warn_frame": -999,
+                "last_brake_frame": -999,
+                "cooldown": 30,
+                "prev_cursor": -1,
+            }
 
     except KeyboardInterrupt:
         print("[stream] interrupted", flush=True)
@@ -268,9 +289,22 @@ def _read_control(control_path: str) -> tuple:
 def _render_frame(cursor, frame_items, frame_cache, args, lane_processor,
                   detector, tracker, risk_estimator, ctx_service, decide,
                   draw_lanes, draw_obstacles, draw_risk, cv2,
-                  tmp_path, latest_path, status_path, iteration, n_frames, log_every):
+                  tmp_path, latest_path, status_path, iteration, n_frames, log_every,
+                  action_state):
     """Run pipeline on one frame and write output to stream files."""
+    from adas.collision_risk.types import SystemAction
     os.makedirs(os.path.dirname(tmp_path), exist_ok=True)
+
+    # Reset stateful components when cursor jumps backward (seek/rewind).
+    # Without reset, the Kalman filter predicts from the wrong position.
+    prev_cursor_val = action_state.get("prev_cursor", -1)
+    if cursor < prev_cursor_val:
+        lane_processor.reset()
+        detector.reset()
+        tracker.reset()
+        risk_estimator.reset()
+    action_state["prev_cursor"] = cursor
+
     frame_idx, _ref = frame_items[cursor]
     frame = frame_cache.get(cursor)
     if frame is None:
@@ -285,7 +319,49 @@ def _render_frame(cursor, frame_items, frame_cache, args, lane_processor,
     raw_det = detector.detect(frame, lane_output=lane_output, context_state=ctx_state)
     tracked = tracker.update(raw_det)
     risks = risk_estimator.estimate_risk(tracked, lane_output=lane_output, context_state=ctx_state, frame_idx=frame_idx)
-    action, intensity = decide(risks, context_state=ctx_state)
+    raw_action, raw_intensity = decide(risks, context_state=ctx_state)
+
+    stable = action_state["stable"]
+    pending = action_state["pending"]
+    pending_count = action_state["pending_count"]
+    stable_intensity = action_state["stable_intensity"]
+
+    if raw_action == stable:
+        pending = raw_action
+        pending_count = 0
+        stable_intensity = max(0.0, min(1.0, 0.7 * stable_intensity + 0.3 * raw_intensity))
+        action = stable
+        intensity = stable_intensity
+    else:
+        if raw_action == pending:
+            pending_count += 1
+        else:
+            pending = raw_action
+            pending_count = 1
+
+        needed = 2 if raw_action != SystemAction.NONE else 4
+        if pending_count >= needed:
+            stable = raw_action
+            stable_intensity = raw_intensity
+            pending_count = 0
+
+        action = stable
+        intensity = stable_intensity
+
+    action_state["stable"] = stable
+    action_state["pending"] = pending
+    action_state["pending_count"] = pending_count
+    action_state["stable_intensity"] = stable_intensity
+
+    if not args.no_audio:
+        from adas.ui.audio import play_warning_beep, play_brake_beep
+        cooldown = int(action_state["cooldown"])
+        if action == SystemAction.BRAKE and frame_idx - int(action_state["last_brake_frame"]) > cooldown:
+            play_brake_beep()
+            action_state["last_brake_frame"] = frame_idx
+        elif action == SystemAction.WARN and frame_idx - int(action_state["last_warn_frame"]) > cooldown:
+            play_warning_beep()
+            action_state["last_warn_frame"] = frame_idx
 
     display = frame.copy()
     if not args.no_lanes:
@@ -433,6 +509,7 @@ def _run_normal(args: argparse.Namespace) -> None:
         show_lanes=not args.no_lanes,
         show_obstacles=not args.no_obstacles,
         show_risk=not args.no_risk,
+        image_dir=args.image_dir or None,
     )
     run_scenario(cfg)
 

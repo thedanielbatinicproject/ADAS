@@ -26,6 +26,7 @@ class ScenarioConfig:
     show_lanes: bool = True
     show_obstacles: bool = True
     show_risk: bool = True
+    image_dir: Optional[str] = None  # override: use this image folder instead of DB lookup
 
 
 @dataclass

@@ -244,3 +244,4 @@ docs/*.bcf-SAVE-ERROR
 docs/*.bbl-SAVE-ERROR
 PLAN.txt
 /dataprocessedconfigurator_stream
+/data/temp

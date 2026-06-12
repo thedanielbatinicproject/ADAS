@@ -75,6 +75,11 @@ class EstimatorConfig:
     in_lane_distance_fraction: float = 0.5
     assumed_ego_speed_mps: float = 10.0
     velocity_buffer_size: int = 8
+    min_distance_delta_m: float = 0.4
+    max_relative_speed_mps: float = 30.0
+    risk_ema_alpha: float = 0.35
+    distance_ema_alpha: float = 0.35
+    max_distance_jump_m: float = 4.0
 
 
 DEFAULT_ESTIMATOR_CONFIG = apply_dataclass_overrides(EstimatorConfig(), "estimator")
@@ -95,10 +100,14 @@ class RiskEstimator:
         self._config = config or DEFAULT_ESTIMATOR_CONFIG
         # track_id -> deque of (frame_idx, distance_m)
         self._distance_history: Dict[int, List[Tuple[int, float]]] = defaultdict(list)
+        self._distance_ema: Dict[int, float] = {}
+        self._risk_ema: Dict[int, float] = {}
 
     def reset(self) -> None:
         """Clear history (call when switching to a new video)."""
         self._distance_history.clear()
+        self._distance_ema.clear()
+        self._risk_ema.clear()
 
     def estimate_risk(
         self,
@@ -140,6 +149,18 @@ class RiskEstimator:
             dist_m = obj.distance_estimate
             track_id = obj.track_id
 
+            # Smooth noisy distance estimates per track to reduce TTC/risk jitter.
+            if dist_m is not None and track_id >= 0:
+                d_cur = float(dist_m)
+                prev_d = self._distance_ema.get(track_id)
+                if prev_d is not None:
+                    max_jump = max(0.5, self._config.max_distance_jump_m)
+                    d_cur = max(prev_d - max_jump, min(prev_d + max_jump, d_cur))
+                    a_d = self._config.distance_ema_alpha
+                    d_cur = (a_d * d_cur) + ((1.0 - a_d) * prev_d)
+                self._distance_ema[track_id] = d_cur
+                dist_m = d_cur
+
             # Update distance history
             if dist_m is not None and track_id >= 0:
                 history = self._distance_history[track_id]
@@ -160,10 +181,18 @@ class RiskEstimator:
             )
 
             # Risk score
-            risk_score = _compute_risk_score(
+            raw_risk_score = _compute_risk_score(
                 dist_m, ttc, lateral_offset_m, in_ego_lane,
                 braking_mult, self._config
             )
+
+            prev = self._risk_ema.get(track_id)
+            if prev is None:
+                risk_score = raw_risk_score
+            else:
+                a = self._config.risk_ema_alpha
+                risk_score = (a * raw_risk_score) + ((1.0 - a) * prev)
+            self._risk_ema[track_id] = risk_score
 
             results.append(RiskResult(
                 object_id=track_id,
@@ -179,6 +208,8 @@ class RiskEstimator:
         stale = [tid for tid in self._distance_history if tid not in active_ids]
         for tid in stale:
             del self._distance_history[tid]
+            self._distance_ema.pop(tid, None)
+            self._risk_ema.pop(tid, None)
 
         return results
 
@@ -189,23 +220,32 @@ class RiskEstimator:
         Positive value means the obstacle is approaching.
         """
         history = self._distance_history.get(track_id, [])
-        if len(history) < 2:
+        if len(history) < 3:
             return None
 
-        oldest_frame, oldest_dist = history[0]
-        newest_frame, newest_dist = history[-1]
-        delta_frames = newest_frame - oldest_frame
-        if delta_frames <= 0:
+        vel_samples: List[float] = []
+        for (f0, d0), (f1, d1) in zip(history[:-1], history[1:]):
+            df = f1 - f0
+            if df <= 0:
+                continue
+            delta_d = d0 - d1  # positive => approaching
+            if abs(delta_d) < self._config.min_distance_delta_m:
+                continue
+            dt = df / 30.0
+            if dt <= 1e-6:
+                continue
+            v = delta_d / dt
+            if 0.0 < v <= self._config.max_relative_speed_mps:
+                vel_samples.append(v)
+
+        if not vel_samples:
             return None
 
-        # Assume 30 fps when FPS is not explicitly tracked
-        delta_s = delta_frames / 30.0
-        if delta_s < 1e-6:
-            return None
-
-        # Positive = approaching (distance decreasing)
-        rel_vel = (oldest_dist - newest_dist) / delta_s
-        return rel_vel
+        vel_samples.sort()
+        mid = len(vel_samples) // 2
+        if len(vel_samples) % 2 == 1:
+            return float(vel_samples[mid])
+        return float((vel_samples[mid - 1] + vel_samples[mid]) * 0.5)
 
 
 # ---------------------------------------------------------------------------
@@ -227,9 +267,10 @@ def _compute_ttc(
         # Obstacle is approaching
         ttc = distance_m / rel_vel_mps
     else:
-        # Fallback: use assumed ego speed as conservative approach rate
-        fallback_vel = cfg.assumed_ego_speed_mps
-        ttc = distance_m / fallback_vel
+        # Unknown/non-approaching relative velocity: use conservative fallback
+        # based on assumed ego speed so TTC remains finite and comparable.
+        ego_v = max(0.1, float(cfg.assumed_ego_speed_mps))
+        ttc = distance_m / ego_v
 
     return min(float(ttc), cfg.max_ttc_s * 2)
 

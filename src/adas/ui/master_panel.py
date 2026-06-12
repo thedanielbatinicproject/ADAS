@@ -105,6 +105,12 @@ class MasterDashboard:
         self._cfg_paused = False
         self._cfg_suppress_slider = False
 
+        # Custom video override state
+        self._custom_video_dir: Optional[str] = None  # temp frames dir (relative to project root)
+        self._custom_video_abs_dir: Optional[str] = None  # absolute path for cleanup
+        self._custom_video_temp_root = os.path.join(self.project_root, "data", "temp")
+        self._custom_video_btn_theme: Optional[int] = None
+
     def run(self) -> None:
         dpg.create_context()
         self._build_theme()
@@ -133,6 +139,7 @@ class MasterDashboard:
         self._cancel_active_process()
         self._stop_configurator()
         dpg.destroy_context()
+        self._cleanup_custom_video_temp()
 
     def _build_theme(self) -> None:
         with dpg.theme() as row_theme:
@@ -168,6 +175,14 @@ class MasterDashboard:
                 dpg.add_theme_style(dpg.mvStyleVar_ChildBorderSize, 2)
         self._cfg_card_theme = cfg_theme
 
+        with dpg.theme() as custom_vid_btn_theme:
+            with dpg.theme_component(dpg.mvButton):
+                dpg.add_theme_color(dpg.mvThemeCol_Button, (160, 60, 0))
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (200, 85, 10))
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (130, 45, 0))
+                dpg.add_theme_color(dpg.mvThemeCol_Text, (255, 255, 255))
+        self._custom_video_btn_theme = custom_vid_btn_theme
+
     def _build_ui(self) -> None:
         with dpg.window(tag="root", no_title_bar=True, no_move=True, no_resize=True, width=-1, height=-1):
             with dpg.group(horizontal=True):
@@ -185,6 +200,10 @@ class MasterDashboard:
                 dpg.add_text("Video Index Table", color=(255, 100, 100))
                 dpg.add_spacer(width=14)
                 dpg.add_button(label="VIEW LOG", callback=self._open_log_window, width=120, height=24)
+                dpg.add_spacer(width=8)
+                _cv_btn = dpg.add_button(label="ADD CUSTOM VIDEO", callback=self._on_add_custom_video, width=180, height=24)
+                if self._custom_video_btn_theme is not None:
+                    dpg.bind_item_theme(_cv_btn, self._custom_video_btn_theme)
             dpg.add_separator()
             with dpg.group(horizontal=True):
                 dpg.add_text("Index path:", color=(170, 170, 170))
@@ -772,13 +791,16 @@ class MasterDashboard:
     # ------------------------------------------------------------------
 
     def _open_configurator(self) -> None:
-        sel = self._ensure_selected()
-        if sel is None:
-            return
         if not _HAS_PIL:
             self._show_toast("Pillow (PIL) is required for the configurator live preview.")
             return
-        cat, vid = sel
+        if self._custom_video_dir:
+            cat, vid = 0, 0
+        else:
+            sel = self._ensure_selected()
+            if sel is None:
+                return
+            cat, vid = sel
         if dpg.does_item_exist("cfg_window"):
             dpg.configure_item("cfg_window", show=True)
             dpg.focus_item("cfg_window")
@@ -1128,10 +1150,8 @@ class MasterDashboard:
         # Persist current configurator params so Docker picks them up
         self._cfg_save_all()
 
-        cmd = self._docker_exec_cmd([
+        base_cmd = [
             "python", "scripts/run_scenario.py",
-            "--category-id", str(cat),
-            "--video-id", str(vid),
             "--ui-backend", "none",
             "--target-fps", "15",
             "--stream-dir", "data/processed/configurator_stream",
@@ -1139,7 +1159,12 @@ class MasterDashboard:
             "--log-every", "30",
             "--no-audio",
             "--context-interval", dpg.get_value("ctx_interval").strip() or "5",
-        ])
+        ]
+        if self._custom_video_dir:
+            base_cmd += ["--image-dir", self._custom_video_dir]
+        else:
+            base_cmd += ["--category-id", str(cat), "--video-id", str(vid)]
+        cmd = self._docker_exec_cmd(base_cmd)
 
         self._cfg_log(f"$ {' '.join(cmd)}", (140, 200, 255))
 
@@ -1210,10 +1235,13 @@ class MasterDashboard:
         self._cfg_log("[configurator] stopped", (255, 210, 120))
 
     def _restart_configurator(self) -> None:
-        sel = self._ensure_selected()
-        if sel is None:
-            return
-        cat, vid = sel
+        if self._custom_video_dir:
+            cat, vid = 0, 0
+        else:
+            sel = self._ensure_selected()
+            if sel is None:
+                return
+            cat, vid = sel
         self._stop_configurator()
         self._start_configurator(cat, vid)
 
@@ -2136,12 +2164,23 @@ class MasterDashboard:
         self._render_table()
 
     def _update_page_rows(self) -> None:
-        total = len(self.filtered_rows)
+        # Deduplicate display rows by (category_id, video_id): show only one
+        # representative row per unique video, preferring record_type='images'.
+        seen: set = set()
+        deduped: list = []
+        for row in self.filtered_rows:
+            key = (row.get("category_id"), row.get("video_id"))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(row)
+
+        total = len(deduped)
         page_count = max(1, (total + self.page_size - 1) // self.page_size)
         self.page_index = max(0, min(self.page_index, page_count - 1))
         start = self.page_index * self.page_size
         end = start + self.page_size
-        self.page_rows = self.filtered_rows[start:end]
+        self.page_rows = deduped[start:end]
         dpg.set_value("page_info", f"page {self.page_index + 1}/{page_count} - rows {total}")
 
     def _prev_page(self) -> None:
@@ -2215,21 +2254,232 @@ class MasterDashboard:
     def _on_select_row(self, row: Optional[Dict[str, Any]]) -> None:
         if row is None:
             return
+        # Selecting a dataset row clears any active custom video override.
+        if self._custom_video_dir is not None:
+            self._cleanup_custom_video_temp()
+            self._custom_video_dir = None
         try:
             self.selected_row = row
             self.selected_row_id = self._row_uid(row)
             cat = row.get("category_id")
             vid = row.get("video_id")
             dpg.set_value("selected_video_label", f"category_id={cat}, video_id={vid}, record_id={row.get('record_id')}")
+            if dpg.does_item_exist("selected_video_label"):
+                dpg.configure_item("selected_video_label", color=(255, 255, 255))
             dpg.set_value("run_scenario_category", f"category_id: {cat}")
             dpg.set_value("run_scenario_video", f"video_id: {vid}")
+            if dpg.does_item_exist("run_scenario_category"):
+                dpg.configure_item("run_scenario_category", color=(255, 255, 255))
+            if dpg.does_item_exist("run_scenario_video"):
+                dpg.configure_item("run_scenario_video", color=(255, 255, 255))
             if dpg.does_item_exist("cfg_launcher_category"):
                 dpg.set_value("cfg_launcher_category", f"category_id: {cat}")
+                dpg.configure_item("cfg_launcher_category", color=(255, 255, 255))
             if dpg.does_item_exist("cfg_launcher_video"):
                 dpg.set_value("cfg_launcher_video", f"video_id: {vid}")
+                dpg.configure_item("cfg_launcher_video", color=(255, 255, 255))
         except Exception:
             pass
         self._render_table()
+
+    # ------------------------------------------------------------------
+    # Custom video override
+    # ------------------------------------------------------------------
+
+    def _on_add_custom_video(self) -> None:
+        """Open a DPG file-dialog to choose a video file, extract frames, and
+        activate the custom-video override mode."""
+        def _file_selected(sender: Any, app_data: Any) -> None:
+            selections = app_data.get("selections", {})
+            if not selections:
+                return
+            # DPG returns a dict filename->fullpath; take the first item
+            video_path = next(iter(selections.values()))
+            self._extract_and_activate_custom_video(video_path)
+
+        # Build extension filter list for DPG file dialog
+        supported_exts = [
+            ".mp4", ".mov", ".mkv", ".avi", ".wmv",
+            ".webm", ".flv", ".m4v", ".ts", ".mts",
+            ".3gp", ".ogv", ".mpg", ".mpeg",
+        ]
+        ext_label = "Video Files"
+        try:
+            with dpg.file_dialog(
+                label="Select Video File",
+                callback=_file_selected,
+                width=760,
+                height=500,
+                modal=True,
+                file_count=1,
+            ):
+                for ext in supported_exts:
+                    dpg.add_file_extension(ext, color=(180, 255, 180, 255))
+                dpg.add_file_extension(".*")
+        except Exception as exc:
+            self._show_toast(f"File dialog error: {exc}")
+
+    def _extract_and_activate_custom_video(self, video_path: str) -> None:
+        """Copy *video_path* into the shared data/temp dir, then run frame
+        extraction INSIDE the Docker container (where cv2 is available)."""
+        import uuid as _uuid
+        import threading as _thr
+        import shutil as _sh
+
+        video_path = os.path.normpath(video_path)
+        if not os.path.isfile(video_path):
+            self._show_toast(f"File not found: {video_path}")
+            return
+
+        uid = _uuid.uuid4().hex[:12]
+        # temp_dir is the absolute host path (= /app/data/temp/<uid> in container)
+        temp_dir = os.path.join(self._custom_video_temp_root, uid)
+        frames_dir = os.path.join(temp_dir, "frames")
+        os.makedirs(temp_dir, exist_ok=True)
+
+        # Copy video into the shared volume so the container can read it
+        _, ext = os.path.splitext(video_path)
+        container_video_name = f"input{ext.lower()}"
+        host_video_copy = os.path.join(temp_dir, container_video_name)
+
+        self._startup_log(f"[custom video] Copying: {os.path.basename(video_path)} …", (200, 160, 80))
+        dpg.configure_item("startup_overlay", show=True)
+
+        def _extract() -> None:
+            try:
+                _sh.copy2(video_path, host_video_copy)
+            except Exception as exc:
+                self._startup_log(f"[custom video] Copy failed: {exc}", (255, 130, 130))
+                _sh.rmtree(temp_dir, ignore_errors=True)
+                self._pending_custom_activation = None
+                return
+
+            # Container-relative paths (project root = /app)
+            rel_video = os.path.relpath(host_video_copy, self.project_root).replace(os.sep, "/")
+            rel_frames = os.path.relpath(frames_dir, self.project_root).replace(os.sep, "/")
+
+            cmd = self._docker_exec_cmd([
+                "python",
+                "scripts/dataset/extract_video.py",
+                "--video-path", rel_video,
+                "--output-dir", rel_frames,
+            ])
+
+            self._startup_log(f"[custom video] Running extraction inside Docker …", (200, 160, 80))
+
+            try:
+                kwargs: Dict[str, Any] = dict(
+                    cwd=self.project_root,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                proc = subprocess.Popen(cmd, **kwargs)
+                assert proc.stdout is not None
+                n_extracted = 0
+                for line in proc.stdout:
+                    line = line.rstrip("\n")
+                    if line.startswith("PROGRESS:"):
+                        parts = line[len("PROGRESS:"):].split("/")
+                        done_s = parts[0]
+                        total_s = parts[1] if len(parts) > 1 else "0"
+                        try:
+                            done_i = int(done_s)
+                            total_i = int(total_s)
+                            if total_i > 0 and done_i % max(1, total_i // 20) == 0:
+                                self._startup_log(
+                                    f"[custom video] {done_i}/{total_i} frames …",
+                                    (200, 160, 80),
+                                )
+                        except ValueError:
+                            pass
+                    elif line.startswith("DONE:"):
+                        try:
+                            n_extracted = int(line[5:])
+                        except ValueError:
+                            pass
+                    elif line.startswith("ERROR:"):
+                        self._startup_log(f"[custom video] {line}", (255, 130, 130))
+                proc.stdout.close()
+                proc.wait()
+            except Exception as exc:
+                self._startup_log(f"[custom video] Docker exec failed: {exc}", (255, 130, 130))
+                _sh.rmtree(temp_dir, ignore_errors=True)
+                self._pending_custom_activation = None
+                return
+
+            # Remove the copied source video to save disk space
+            try:
+                os.remove(host_video_copy)
+            except OSError:
+                pass
+
+            if n_extracted == 0:
+                self._startup_log(
+                    "[custom video] No frames extracted – unsupported format or empty video.",
+                    (255, 130, 130),
+                )
+                _sh.rmtree(temp_dir, ignore_errors=True)
+                self._pending_custom_activation = None
+                return
+
+            self._startup_log(
+                f"[custom video] {n_extracted} frames ready. Activating override.",
+                (100, 220, 100),
+            )
+            self._pending_custom_activation = (rel_frames, frames_dir, n_extracted)
+
+        self._pending_custom_activation: Any = None
+        t = _thr.Thread(target=_extract, daemon=True)
+        t.start()
+
+        def _poll() -> None:
+            while t.is_alive():
+                time.sleep(0.2)
+            result = getattr(self, "_pending_custom_activation", None)
+            if result is not None:
+                rel_dir, abs_dir, _n = result
+                self._custom_video_dir = rel_dir
+                self._custom_video_abs_dir = abs_dir
+                self.selected_row = None
+                self.selected_row_id = None
+                self._set_custom_video_override_labels()
+                self._render_table()
+            dpg.configure_item("startup_overlay", show=False)
+
+        _thr.Thread(target=_poll, daemon=True).start()
+
+    def _set_custom_video_override_labels(self) -> None:
+        """Set all cat/vid label fields to INPUT OVERRIDE in light orange."""
+        _orange = (255, 170, 60)
+        _label = "INPUT OVERRIDE"
+        try:
+            dpg.set_value("selected_video_label", _label)
+            dpg.configure_item("selected_video_label", color=_orange)
+        except Exception:
+            pass
+        for tag in ("run_scenario_category", "run_scenario_video",
+                    "cfg_launcher_category", "cfg_launcher_video"):
+            try:
+                if dpg.does_item_exist(tag):
+                    dpg.set_value(tag, _label)
+                    dpg.configure_item(tag, color=_orange)
+            except Exception:
+                pass
+
+    def _cleanup_custom_video_temp(self) -> None:
+        """Delete the temp frames directory if one was created."""
+        abs_dir = getattr(self, "_custom_video_abs_dir", None)
+        if abs_dir and os.path.isdir(abs_dir):
+            try:
+                import shutil as _sh
+                _sh.rmtree(abs_dir, ignore_errors=True)
+            except Exception:
+                pass
+        self._custom_video_abs_dir = None
 
     def _ensure_selected(self) -> Optional[Tuple[int, int]]:
         if not self.selected_row:
@@ -2243,25 +2493,26 @@ class MasterDashboard:
         return cat, vid
 
     def _run_scenario_cmd(self) -> None:
-        sel = self._ensure_selected()
-        if sel is None:
-            return
-        cat, vid = sel
         self._set_override_section("context", {"context_interval": dpg.get_value("ctx_interval").strip() or "5"})
-        cmd = self._docker_exec_cmd([
+        base_cmd = [
             "python",
             "scripts/run_scenario.py",
-            "--category-id",
-            str(cat),
-            "--video-id",
-            str(vid),
             "--ui-backend",
             dpg.get_value("run_scenario_ui"),
             "--target-fps",
             dpg.get_value("run_scenario_fps").strip() or "30",
             "--context-interval",
             dpg.get_value("ctx_interval").strip() or "5",
-        ])
+        ]
+        if self._custom_video_dir:
+            base_cmd += ["--image-dir", self._custom_video_dir]
+        else:
+            sel = self._ensure_selected()
+            if sel is None:
+                return
+            cat, vid = sel
+            base_cmd += ["--category-id", str(cat), "--video-id", str(vid)]
+        cmd = self._docker_exec_cmd(base_cmd)
         max_frames = dpg.get_value("run_scenario_max_frames").strip()
         if max_frames:
             cmd += ["--max-frames", max_frames]
@@ -2300,49 +2551,55 @@ class MasterDashboard:
         self._reload_table_data(show_message=True)
 
     def _run_play_video_cmd(self) -> None:
-        sel = self._ensure_selected()
-        if sel is None:
-            return
-        cat, vid = sel
-        cmd = self._docker_exec_cmd([
+        base_cmd = [
             "python",
             "scripts/dataset/play_index_video.py",
-            "--index-path",
-            "data/processed/index.db",
-            "--category-id",
-            str(cat),
-            "--video-id",
-            str(vid),
             "--delay-ms",
             dpg.get_value("play_video_delay").strip() or "33",
             "--max-width",
             dpg.get_value("play_video_max_width").strip() or "1280",
             "--ui-backend",
             dpg.get_value("play_video_ui"),
-        ])
+        ]
+        if self._custom_video_dir:
+            base_cmd += ["--image-dir", self._custom_video_dir]
+        else:
+            sel = self._ensure_selected()
+            if sel is None:
+                return
+            cat, vid = sel
+            base_cmd += [
+                "--index-path", "data/processed/index.db",
+                "--category-id", str(cat),
+                "--video-id", str(vid),
+            ]
+        cmd = self._docker_exec_cmd(base_cmd)
         self._start_process("Play Index Video", cmd)
 
     def _run_debug_lanes_cmd(self) -> None:
-        sel = self._ensure_selected()
-        if sel is None:
-            return
-        cat, vid = sel
-        cmd = self._docker_exec_cmd([
+        base_cmd = [
             "python",
             "scripts/debug_lanes.py",
-            "--index-path",
-            "data/processed/index.db",
-            "--category-id",
-            str(cat),
-            "--video-id",
-            str(vid),
             "--delay-ms",
             dpg.get_value("debug_lanes_delay").strip() or "33",
             "--max-width",
             dpg.get_value("debug_lanes_max_width").strip() or "1280",
             "--ui-backend",
             dpg.get_value("debug_lanes_ui"),
-        ])
+        ]
+        if self._custom_video_dir:
+            base_cmd += ["--image-dir", self._custom_video_dir]
+        else:
+            sel = self._ensure_selected()
+            if sel is None:
+                return
+            cat, vid = sel
+            base_cmd += [
+                "--index-path", "data/processed/index.db",
+                "--category-id", str(cat),
+                "--video-id", str(vid),
+            ]
+        cmd = self._docker_exec_cmd(base_cmd)
         max_frames = dpg.get_value("debug_lanes_max_frames").strip()
         if max_frames:
             cmd += ["--max-frames", max_frames]
@@ -2351,26 +2608,29 @@ class MasterDashboard:
         self._start_process("Debug Lanes", cmd)
 
     def _run_debug_obstacles_cmd(self) -> None:
-        sel = self._ensure_selected()
-        if sel is None:
-            return
-        cat, vid = sel
-        cmd = self._docker_exec_cmd([
+        base_cmd = [
             "python",
             "scripts/debug_obstacles.py",
-            "--index-path",
-            "data/processed/index.db",
-            "--category-id",
-            str(cat),
-            "--video-id",
-            str(vid),
             "--delay-ms",
             dpg.get_value("debug_obs_delay").strip() or "33",
             "--max-width",
             dpg.get_value("debug_obs_max_width").strip() or "1280",
             "--ui-backend",
             dpg.get_value("debug_obs_ui"),
-        ])
+        ]
+        if self._custom_video_dir:
+            base_cmd += ["--image-dir", self._custom_video_dir]
+        else:
+            sel = self._ensure_selected()
+            if sel is None:
+                return
+            cat, vid = sel
+            base_cmd += [
+                "--index-path", "data/processed/index.db",
+                "--category-id", str(cat),
+                "--video-id", str(vid),
+            ]
+        cmd = self._docker_exec_cmd(base_cmd)
         max_frames = dpg.get_value("debug_obs_max_frames").strip()
         if max_frames:
             cmd += ["--max-frames", max_frames]
@@ -2379,26 +2639,29 @@ class MasterDashboard:
         self._start_process("Debug Obstacles", cmd)
 
     def _run_analyze_context_cmd(self) -> None:
-        sel = self._ensure_selected()
-        if sel is None:
-            return
-        cat, vid = sel
-        cmd = self._docker_exec_cmd([
+        base_cmd = [
             "python",
             "scripts/context/analyze_video.py",
-            "--index-path",
-            "data/processed/index.db",
-            "--category-id",
-            str(cat),
-            "--video-id",
-            str(vid),
             "--every-n",
             dpg.get_value("analyze_every_n").strip() or "10",
             "--delay-ms",
             dpg.get_value("analyze_delay").strip() or "33",
             "--ui-backend",
             dpg.get_value("analyze_ui"),
-        ])
+        ]
+        if self._custom_video_dir:
+            base_cmd += ["--image-dir", self._custom_video_dir]
+        else:
+            sel = self._ensure_selected()
+            if sel is None:
+                return
+            cat, vid = sel
+            base_cmd += [
+                "--index-path", "data/processed/index.db",
+                "--category-id", str(cat),
+                "--video-id", str(vid),
+            ]
+        cmd = self._docker_exec_cmd(base_cmd)
         max_frames = dpg.get_value("analyze_max_frames").strip()
         if max_frames:
             cmd += ["--max-frames", max_frames]

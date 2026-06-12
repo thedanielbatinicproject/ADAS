@@ -153,3 +153,18 @@ class TestRiskEstimator:
         obj = _make_object(track_id=42, distance_m=15.0)
         result = est.estimate_risk([obj], frame_idx=0)
         assert result[0].object_id == 42
+
+    def test_distance_smoothing_reduces_spikes(self):
+        cfg = EstimatorConfig(distance_ema_alpha=0.35, max_distance_jump_m=3.0)
+        est = RiskEstimator(config=cfg)
+        track_id = 7
+
+        # Abrupt noisy jumps should be clamped/smoothed.
+        noisy = [20.0, 19.8, 27.5, 19.6, 26.8, 19.4]
+        out = []
+        for i, d in enumerate(noisy):
+            res = est.estimate_risk([_make_object(track_id=track_id, distance_m=d)], frame_idx=i)
+            out.append(res[0].distance_m)
+
+        # Smoothed output should not follow full spikes.
+        assert max(out) < 25.0

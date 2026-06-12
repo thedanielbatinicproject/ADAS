@@ -21,38 +21,93 @@
 \usepackage{xcolor}
 \renewcommand{\lstlistingname}{Isječak}
 \renewcommand{\lstlistlistingname}{Popis isječaka koda}
+
+% ---- VS Code Light+ paleta boja ----
+\definecolor{lst@bg}{HTML}{F8F8F8}
+\definecolor{lst@frame}{HTML}{DDDDDD}
+\definecolor{lst@linenr}{HTML}{AAAAAA}
+\definecolor{lst@keyword}{HTML}{0000FF}   % plava — if, for, return, ...
+\definecolor{lst@defkw}{HTML}{AF00DB}     % ljubičasta — def, class, import, ...
+\definecolor{lst@string}{HTML}{A31515}    % tamnocrvena — stringovi
+\definecolor{lst@comment}{HTML}{3F7F5F}   % zelena — komentari
+\definecolor{lst@number}{HTML}{098658}    % tirkizna — brojevi
+\definecolor{lst@builtin}{HTML}{267F99}   % tirkizno-plava — print, len, ...
+\definecolor{lst@decorator}{HTML}{795E26} % zlatno-smeđa — @dataclass, ...
+\definecolor{lst@bash@cmd}{HTML}{811F3F}  % tamnocrvena — bash ključne riječi
+\definecolor{lst@bash@flag}{HTML}{0070C1} % plava — argumenti s --
+\definecolor{lst@bash@comment}{HTML}{3F7F5F}
+
 \lstset{
     literate=
       {č}{{\v{c}}}1 {Č}{{\v{C}}}1
-      {ć}{{\'c}}1  {Ć}{{\'C}}1
+      {ć}{{\'c}}1   {Ć}{{\'C}}1
       {š}{{\v{s}}}1 {Š}{{\v{S}}}1
       {ž}{{\v{z}}}1 {Ž}{{\v{Z}}}1
-      {đ}{{\dj}}1  {Đ}{{\DJ}}1
-      {ô}{{\^o}}1  {â}{{\^a}}1
+      {đ}{{\dj}}1   {Đ}{{\DJ}}1
+      {ô}{{\^o}}1   {â}{{\^a}}1
 }
+
 \lstdefinestyle{pycode}{
     language=Python,
-    basicstyle=\ttfamily\small,
-    keywordstyle=\color{blue}\bfseries,
-    commentstyle=\color{gray}\itshape,
-    stringstyle=\color{teal},
+    basicstyle=\ttfamily\footnotesize,
+    % Ključne riječi — dvije grupe za dvije boje
+    keywordstyle=\color{lst@keyword}\bfseries,
+    keywordstyle=[2]\color{lst@defkw}\bfseries,
+    keywordstyle=[3]\color{lst@builtin},
+    keywordstyle=[4]\color{lst@decorator},
+    % def, class, import, from, as, with, async, await — ljubičasta
+    morekeywords=[2]{def,class,import,from,as,with,async,await,lambda,yield,
+                     raise,pass,del,global,nonlocal,assert},
+    % Ugrađene funkcije
+    morekeywords=[3]{print,len,range,enumerate,zip,map,filter,sorted,reversed,
+                     list,dict,set,tuple,int,float,str,bool,bytes,type,
+                     isinstance,issubclass,hasattr,getattr,setattr,delattr,
+                     open,input,repr,format,abs,round,min,max,sum,any,all,
+                     iter,next,super,property,staticmethod,classmethod,
+                     vars,dir,id,hash,callable,NotImplemented,
+                     None,True,False},
+    % Dekoratori (prepoznati kao ključna riječ)
+    morekeywords=[4]{dataclass,frozen,abstractmethod,overload,
+                     cached_property,field,fields},
+    commentstyle=\color{lst@comment}\itshape,
+    stringstyle=\color{lst@string},
+    numberstyle=\tiny\color{lst@linenr},
     numbers=left,
-    numberstyle=\tiny\color{gray},
-    numbersep=8pt,
-    frame=single,
+    numbersep=10pt,
+    backgroundcolor=\color{lst@bg},
+    frame=l,                          % samo lijeva linija
+    framesep=6pt,
+    framerule=3pt,
+    rulecolor=\color{lst@frame},
+    xleftmargin=14pt,
     breaklines=true,
+    breakatwhitespace=true,
     captionpos=b,
     showstringspaces=false,
     tabsize=4,
+    keepspaces=true,
 }
+
 \lstdefinestyle{bashcode}{
     language=bash,
-    basicstyle=\ttfamily\small,
-    keywordstyle=\color{brown}\bfseries,
-    commentstyle=\color{gray}\itshape,
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{lst@bash@cmd}\bfseries,
+    commentstyle=\color{lst@bash@comment}\itshape,
+    stringstyle=\color{lst@string},
+    % Česte bash/CLI naredbe
+    morekeywords={python,python3,poetry,make,docker,git,cd,ls,cp,mv,rm,
+                  mkdir,echo,cat,grep,find,chmod,export,source,pip,
+                  pytest,ruff,black,pre-commit},
+    numberstyle=\tiny\color{lst@linenr},
     numbers=none,
-    frame=single,
+    backgroundcolor=\color{lst@bg},
+    frame=l,
+    framesep=6pt,
+    framerule=3pt,
+    rulecolor=\color{lst@frame},
+    xleftmargin=14pt,
     breaklines=true,
+    breakatwhitespace=true,
     captionpos=b,
     showstringspaces=false,
 }

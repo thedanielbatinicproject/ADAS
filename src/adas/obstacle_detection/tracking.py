@@ -29,6 +29,10 @@ class _Track:
 
     track_id: int
     bbox: Tuple[int, int, int, int]
+    area: float = 0.0
+    distance_estimate: float | None = None
+    confidence: float = 1.0
+    frame_idx: int = -1
     missing_frames: int = 0
     age: int = 1  # frames since creation
 
@@ -45,9 +49,15 @@ class SimpleTracker:
         is pruned.
     """
 
-    def __init__(self, iou_threshold: float = 0.25, max_missing: int = 8) -> None:
+    def __init__(
+        self,
+        iou_threshold: float = 0.25,
+        max_missing: int = 8,
+        coast_frames: int = 3,
+    ) -> None:
         self._iou_threshold = iou_threshold
         self._max_missing = max_missing
+        self._coast_frames = max(0, int(coast_frames))
         self._tracks: Dict[int, _Track] = {}
         self._next_id = 1
 
@@ -70,14 +80,17 @@ class SimpleTracker:
             Same detections with track_id filled in.
         """
         if not detections:
-            # Advance missing counters; prune dead tracks
-            dead = [tid for tid, t in self._tracks.items()
-                    if t.missing_frames >= self._max_missing]
+            result: List[DetectedObject] = []
+            dead = []
+            for tid, track in self._tracks.items():
+                track.missing_frames += 1
+                if track.missing_frames <= self._coast_frames:
+                    result.append(self._track_to_object(track, coasting=True))
+                if track.missing_frames >= self._max_missing:
+                    dead.append(tid)
             for tid in dead:
                 del self._tracks[tid]
-            for t in self._tracks.values():
-                t.missing_frames += 1
-            return []
+            return result
 
         track_ids = list(self._tracks.keys())
         track_bboxes = [self._tracks[tid].bbox for tid in track_ids]
@@ -102,6 +115,10 @@ class SimpleTracker:
             tid = track_ids[t_idx]
             track = self._tracks[tid]
             track.bbox = detections[d_idx].bbox
+            track.area = detections[d_idx].area
+            track.distance_estimate = detections[d_idx].distance_estimate
+            track.confidence = detections[d_idx].confidence
+            track.frame_idx = detections[d_idx].frame_idx
             track.missing_frames = 0
             track.age += 1
             det = detections[d_idx]
@@ -120,7 +137,14 @@ class SimpleTracker:
             if d_idx not in matched_det_set:
                 new_id = self._next_id
                 self._next_id += 1
-                self._tracks[new_id] = _Track(track_id=new_id, bbox=det.bbox)
+                self._tracks[new_id] = _Track(
+                    track_id=new_id,
+                    bbox=det.bbox,
+                    area=det.area,
+                    distance_estimate=det.distance_estimate,
+                    confidence=det.confidence,
+                    frame_idx=det.frame_idx,
+                )
                 result.append(DetectedObject(
                     bbox=det.bbox,
                     area=det.area,
@@ -135,13 +159,33 @@ class SimpleTracker:
         dead = []
         for t_idx, tid in enumerate(track_ids):
             if t_idx not in matched_track_set:
-                self._tracks[tid].missing_frames += 1
-                if self._tracks[tid].missing_frames >= self._max_missing:
+                track = self._tracks[tid]
+                track.missing_frames += 1
+                if track.missing_frames <= self._coast_frames:
+                    result.append(self._track_to_object(track, coasting=True))
+                if track.missing_frames >= self._max_missing:
                     dead.append(tid)
         for tid in dead:
             del self._tracks[tid]
 
         return result
+
+    def _track_to_object(self, track: _Track, coasting: bool) -> DetectedObject:
+        x, y, w, h = track.bbox
+        cx = float(x + w / 2.0)
+        cy = float(y + h / 2.0)
+        conf = float(track.confidence)
+        if coasting and track.missing_frames > 0:
+            conf *= max(0.2, 0.8 ** track.missing_frames)
+        return DetectedObject(
+            bbox=track.bbox,
+            area=track.area if track.area > 0 else float(w * h),
+            centroid=(cx, cy),
+            track_id=track.track_id,
+            distance_estimate=track.distance_estimate,
+            confidence=max(0.0, min(1.0, conf)),
+            frame_idx=track.frame_idx,
+        )
 
 
 # ---------------------------------------------------------------------------

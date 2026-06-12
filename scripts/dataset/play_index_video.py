@@ -264,8 +264,9 @@ def _put_overlay(frame: np.ndarray, cat: int, vid: int, pos: int, total: int,
 def main() -> int:
     p = argparse.ArgumentParser(description="Play video/sequence from index.db by category and video id")
     p.add_argument("--index-path", default=indexer.DEFAULT_INDEX_PATH, help="Path to index.db")
-    p.add_argument("--category-id", type=int, required=True, help="Category id (e.g. 1..61)")
-    p.add_argument("--video-id", type=int, required=True, help="Video id within category (e.g. 1, 2, 3)")
+    p.add_argument("--category-id", type=int, required=False, default=0, help="Category id (e.g. 1..61)")
+    p.add_argument("--video-id", type=int, required=False, default=0, help="Video id within category (e.g. 1, 2, 3)")
+    p.add_argument("--image-dir", default=None, help="Use this image folder directly instead of looking up the index.")
     p.add_argument("--delay-ms", type=int, default=30, help="Delay between frames in ms (0 = manual step)")
     p.add_argument("--record-type", default="images", help="Which subfolder to play (default: images)")
     p.add_argument("--window-name", default="DADA2000 Player", help="OpenCV window name")
@@ -279,30 +280,43 @@ def main() -> int:
         print(ctext("[ERROR] OpenCV (cv2) is required for player window.", C_RED))
         return 4
 
-    if not os.path.exists(args.index_path):
-        print(ctext(f"[ERROR] Index file not found: {args.index_path}", C_RED))
-        return 2
+    if args.image_dir:
+        image_dir_abs = args.image_dir if os.path.isabs(args.image_dir) else os.path.join(PROJECT_ROOT, args.image_dir)
+        if not os.path.isdir(image_dir_abs):
+            print(ctext(f"[ERROR] --image-dir not found: {image_dir_abs}", C_RED))
+            return 2
+        annotation = None
+        frame_refs: List[Tuple[int, Any]] = list(parser.iter_frames(image_dir_abs))
+        if not frame_refs:
+            print(ctext("[ERROR] No frames found in --image-dir.", C_RED))
+            return 5
+        total = len(frame_refs)
+        print(ctext(f"[INFO] INPUT OVERRIDE: {total} frames from {image_dir_abs}", C_GREEN), flush=True)
+    else:
+        if not os.path.exists(args.index_path):
+            print(ctext(f"[ERROR] Index file not found: {args.index_path}", C_RED))
+            return 2
 
-    records = get_records_by_key(args.index_path, args.category_id, args.video_id)
-    if not records:
-        print(ctext(f"[ERROR] No record found for category_id={args.category_id}, video_id={args.video_id}", C_RED))
-        return 3
+        records = get_records_by_key(args.index_path, args.category_id, args.video_id)
+        if not records:
+            print(ctext(f"[ERROR] No record found for category_id={args.category_id}, video_id={args.video_id}", C_RED))
+            return 3
 
-    record = pick_record(records, args.record_type)
-    annotation = get_annotation_by_key(args.index_path, args.category_id, args.video_id)
+        record = pick_record(records, args.record_type)
+        annotation = get_annotation_by_key(args.index_path, args.category_id, args.video_id)
 
-    print(ctext(f"[INFO] path={record['path']}  status={record['annotation_status']}", C_GREEN))
-    print_annotation_details(annotation)
-    print(ctext("\nControls: SPACE=pause  A/<= prev  D/>= next  Q=quit  | buttons & frame slider in UI\n", C_CYAN),
-          flush=True)
+        print(ctext(f"[INFO] path={record['path']}  status={record['annotation_status']}", C_GREEN))
+        print_annotation_details(annotation)
+        print(ctext("\nControls: SPACE=pause  A/<= prev  D/>= next  Q=quit  | buttons & frame slider in UI\n", C_CYAN),
+              flush=True)
 
-    print(ctext("[INFO] Loading frame list...", C_GREEN), flush=True)
-    frame_refs: List[Tuple[int, Any]] = list(parser.iter_frames(record["path"]))
-    if not frame_refs:
-        print(ctext("[ERROR] No frames found in record path.", C_RED))
-        return 5
-    total = len(frame_refs)
-    print(ctext(f"[INFO] {total} frames found. Starting playback...", C_GREEN), flush=True)
+        print(ctext("[INFO] Loading frame list...", C_GREEN), flush=True)
+        frame_refs: List[Tuple[int, Any]] = list(parser.iter_frames(record["path"]))
+        if not frame_refs:
+            print(ctext("[ERROR] No frames found in record path.", C_RED))
+            return 5
+        total = len(frame_refs)
+        print(ctext(f"[INFO] {total} frames found. Starting playback...", C_GREEN), flush=True)
 
     gpu_info = "CUDA" if _USE_CUDA else ("OpenCL" if _HAS_OPENCL else "CPU")
     print(ctext(f"[INFO] GPU backend: {gpu_info}  max_display_width={args.max_width}", C_GREEN), flush=True)

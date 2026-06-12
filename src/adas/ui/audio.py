@@ -18,6 +18,11 @@ import time
 
 _log = logging.getLogger(__name__)
 _audio_warned = False
+_audio_lock = threading.Lock()
+_last_warn_ts = 0.0
+_last_brake_ts = 0.0
+_warn_cooldown_s = 0.9
+_brake_cooldown_s = 0.6
 
 
 # ---------------------------------------------------------------------------
@@ -36,6 +41,13 @@ def play_warning_beep(duration_s: float = 0.15, pause_s: float = 0.25, repeats: 
     repeats : int
         Number of beeps in the sequence.
     """
+    global _last_warn_ts
+    now = time.monotonic()
+    with _audio_lock:
+        if now - _last_warn_ts < _warn_cooldown_s:
+            return
+        _last_warn_ts = now
+
     thread = threading.Thread(
         target=_beep_sequence,
         args=(660, duration_s, pause_s, repeats),
@@ -56,6 +68,13 @@ def play_brake_beep(duration_s: float = 0.10, pause_s: float = 0.08, repeats: in
     repeats : int
         Number of beeps in the sequence.
     """
+    global _last_brake_ts
+    now = time.monotonic()
+    with _audio_lock:
+        if now - _last_brake_ts < _brake_cooldown_s:
+            return
+        _last_brake_ts = now
+
     thread = threading.Thread(
         target=_beep_sequence,
         args=(880, duration_s, pause_s, repeats),

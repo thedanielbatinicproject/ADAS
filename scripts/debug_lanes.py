@@ -48,6 +48,10 @@ def _parse_args() -> argparse.Namespace:
         help="Path to index.db.",
     )
     p.add_argument(
+        "--image-dir", default=None,
+        help="Use this image folder directly instead of looking up the index.",
+    )
+    p.add_argument(
         "--dataset-root", default="data/raw/DADA2000",
         help="Path to DADA-2000 root.",
     )
@@ -112,6 +116,9 @@ def main() -> None:
         sys.exit(1)
 
     record_path = record["path"]
+    # Override: use --image-dir if provided
+    if args.image_dir:
+        record_path = args.image_dir if os.path.isabs(args.image_dir) else os.path.join(PROJECT_ROOT, args.image_dir)
     print(f"[debug_lanes] Playing: {record_path}")
 
     # Build frame list (iter_frames yields (idx, ref) tuples)

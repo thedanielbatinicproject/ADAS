@@ -31,8 +31,8 @@ ContextState to improve detection under varying conditions:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, List, Optional
+from dataclasses import dataclass, replace
+from typing import Any, List, Optional, Tuple
 
 from .types import DetectedObject
 from ..utils.runtime_overrides import apply_dataclass_overrides
@@ -78,17 +78,36 @@ class DetectorConfig:
 
     roi_top: float = 0.30
     roi_bottom: float = 0.90
-    min_area: float = 400.0
+    min_area: float = 280.0
     max_area_fraction: float = 0.25
     max_aspect_ratio: float = 6.0
     min_aspect_ratio: float = 0.2
-    mog2_history: int = 120
-    mog2_var_threshold: float = 50.0
+    mog2_history: int = 300
+    mog2_var_threshold: float = 60.0
     mog2_learning_rate: float = 0.005
+    foreground_threshold: int = 150
     morph_kernel_size: int = 5
-    min_confidence: float = 0.3
+    min_confidence: float = 0.18
     focal_length_px: float = 700.0
     assumed_object_height_m: float = 1.5
+    min_bbox_width_px: int = 10
+    min_bbox_height_px: int = 14
+    max_bbox_area_fraction: float = 0.20
+    max_bbox_width_fraction: float = 0.62
+    max_bbox_height_fraction: float = 0.55
+    near_camera_bottom_fraction: float = 0.78
+    min_lane_overlap: float = 0.05
+    min_lane_mask_coverage: float = 0.02
+    merge_iou_threshold: float = 0.10
+    merge_gap_px: int = 20
+    merge_x_overlap_min: float = 0.45
+    merge_vertical_gap_px: int = 60
+    min_fill_ratio: float = 0.10
+    min_solidity: float = 0.12
+    max_detections: int = 20
+    # Suppress detections while MOG2 background model is building up.
+    # During these frames MOG2 is still updated but outputs are discarded.
+    warmup_frames: int = 30
 
 
 DEFAULT_DETECTOR_CONFIG = apply_dataclass_overrides(DetectorConfig(), "obstacle")
@@ -114,22 +133,8 @@ def _config_for_context(
     weather_str = _get_attr_str(context_state, "weather_condition")
     light_str = _get_attr_str(context_state, "light_condition")
 
-    # Start with a copy by re-creating the dataclass with same values.
-    cfg = DetectorConfig(
-        roi_top=base.roi_top,
-        roi_bottom=base.roi_bottom,
-        min_area=base.min_area,
-        max_area_fraction=base.max_area_fraction,
-        max_aspect_ratio=base.max_aspect_ratio,
-        min_aspect_ratio=base.min_aspect_ratio,
-        mog2_history=base.mog2_history,
-        mog2_var_threshold=base.mog2_var_threshold,
-        mog2_learning_rate=base.mog2_learning_rate,
-        morph_kernel_size=base.morph_kernel_size,
-        min_confidence=base.min_confidence,
-        focal_length_px=base.focal_length_px,
-        assumed_object_height_m=base.assumed_object_height_m,
-    )
+    # Shallow dataclass copy preserving all fields/overrides.
+    cfg = replace(base)
 
     if light_str == "night":
         # Night: more sensitive foreground detection
@@ -240,6 +245,10 @@ class Detector:
             config=effective_cfg,
         )
         self._frame_idx += 1
+        # While MOG2 is still building its background model the foreground mask
+        # contains almost everything.  Suppress output until warmup is done.
+        if self._frame_idx <= effective_cfg.warmup_frames:
+            return []
         return result
 
 
@@ -307,12 +316,15 @@ def detect_obstacles(
 
     fg_mask = bg_subtractor.apply(roi, learningRate=cfg.mog2_learning_rate)
 
-    _, fg_mask = cv2.threshold(fg_mask, 200, 255, cv2.THRESH_BINARY)
+    fg_thr = int(max(80, min(240, cfg.foreground_threshold)))
+    _, fg_mask = cv2.threshold(fg_mask, fg_thr, 255, cv2.THRESH_BINARY)
 
     kernel_size = max(1, cfg.morph_kernel_size)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
     fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN, kernel, iterations=1)
     fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_DILATE, kernel, iterations=2)
+    # Join fragmented pieces (person head/body, vehicle parts) into one blob.
+    fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
 
     contours, _ = cv2.findContours(
         fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
@@ -322,6 +334,25 @@ def detect_obstacles(
 
     results: List[DetectedObject] = []
     max_area = roi_area * cfg.max_area_fraction
+    candidates: List[Tuple[Tuple[int, int, int, int], float]] = []
+
+    lane_mask = None
+    lane_overlap_enabled = False
+    lane_roi_y1 = 0  # lane-mask top in full-frame pixel coords
+    if lane_output is not None and hasattr(lane_output, "mask"):
+        lm = getattr(lane_output, "mask", None)
+        if lm is not None and hasattr(lm, "shape") and lm.size > 0:
+            lane_mask = lm
+            lane_roi_y1 = int(getattr(lane_output, "roi_y1", 0))
+            # Coverage check: is there enough lane area to trust the mask?
+            lane_cov = float((lm > 0).sum()) / float(max(1, lm.size))
+            lane_overlap_enabled = lane_cov >= cfg.min_lane_mask_coverage
+
+    roi_h = max(1, y2 - y1)
+    max_bbox_area = roi_area * cfg.max_bbox_area_fraction
+    max_bbox_w = int(w * cfg.max_bbox_width_fraction)
+    max_bbox_h = int(roi_h * cfg.max_bbox_height_fraction)
+    near_bottom_y = int(roi_h * cfg.near_camera_bottom_fraction)
 
     for contour in contours:
         area = float(cv2.contourArea(contour))
@@ -332,8 +363,99 @@ def detect_obstacles(
         if bh == 0:
             continue
 
+        if bw < cfg.min_bbox_width_px or bh < cfg.min_bbox_height_px:
+            continue
+
         aspect = bw / bh
         if aspect > cfg.max_aspect_ratio or aspect < cfg.min_aspect_ratio:
+            continue
+
+        bbox_area = float(max(1, bw * bh))
+        is_giant = (
+            bbox_area > max_bbox_area
+            or bw > max_bbox_w
+            or bh > max_bbox_h
+        )
+        near_camera = (by + bh) >= near_bottom_y
+        if is_giant and not near_camera:
+            continue
+
+        fill_ratio = area / bbox_area
+        if fill_ratio < cfg.min_fill_ratio:
+            continue
+        if is_giant and fill_ratio < max(cfg.min_fill_ratio, 0.18):
+            continue
+
+        hull = cv2.convexHull(contour)
+        hull_area = float(cv2.contourArea(hull))
+        solidity = (area / hull_area) if hull_area > 1e-6 else 0.0
+        if solidity < cfg.min_solidity:
+            continue
+
+        # If lane mask is available, keep detections that overlap the drivable
+        # area; this removes many side-scene false positives (trees/branches).
+        if lane_mask is not None and lane_overlap_enabled:
+            # Convert obstacle-ROI-relative coords to lane-mask-relative coords.
+            # obstacle full-frame y = by + y1 (detector ROI top)
+            # lane mask y = full-frame y - lane_roi_y1
+            lm_y1r = max(0, (by + y1) - lane_roi_y1)
+            lm_y2r = min(lane_mask.shape[0], (by + bh + y1) - lane_roi_y1)
+            x1r = max(0, bx)
+            x2r = min(lane_mask.shape[1], bx + bw)
+            cx = bx + (bw * 0.5)
+            central_view = (0.22 * w) <= cx <= (0.78 * w)  # narrowed from 0.15/0.85
+            if lm_y2r > lm_y1r and x2r > x1r and lm_y1r < lane_mask.shape[0]:
+                patch = lane_mask[lm_y1r:lm_y2r, x1r:x2r]
+                overlap = float((patch > 0).sum()) / float(max(1, patch.size))
+                if overlap < cfg.min_lane_overlap and not central_view:
+                    continue
+            elif not central_view:
+                continue
+
+        # Hard geometric boundary check using lane polynomials.
+        # Rejects objects clearly outside the lane even when mask overlap passes.
+        # Only applied when lane detection is confident and not a synthetic trapezoid.
+        if (
+            lane_output is not None
+            and not getattr(lane_output, 'is_trapezoid', True)
+            and getattr(lane_output, 'lane_confidence', 0.0) >= 0.45
+            and getattr(lane_output, 'left_poly', None) is not None
+            and getattr(lane_output, 'right_poly', None) is not None
+        ):
+            full_cy = float(by + y1 + bh * 0.5)
+            full_cx = float(bx + bw * 0.5)
+            lane_roi_y1_geo = int(getattr(lane_output, 'roi_y1', 0))
+            lane_roi_y2_geo = int(getattr(lane_output, 'roi_y2', h))
+            lane_y = full_cy - lane_roi_y1_geo
+            lane_roi_h_geo = max(1, lane_roi_y2_geo - lane_roi_y1_geo)
+            if 0 <= lane_y <= lane_roi_h_geo:
+                lp = lane_output.left_poly
+                rp = lane_output.right_poly
+                left_x = lp[0] * lane_y**2 + lp[1] * lane_y + lp[2]
+                right_x = rp[0] * lane_y**2 + rp[1] * lane_y + rp[2]
+                margin = 70.0  # px: allow objects partially overlapping lane edge
+                if full_cx < left_x - margin or full_cx > right_x + margin:
+                    continue
+
+        candidates.append(((bx, by, bw, bh), area))
+
+    merged = _merge_candidate_boxes(
+        candidates,
+        iou_thr=cfg.merge_iou_threshold,
+        gap_px=cfg.merge_gap_px,
+        x_overlap_thr=cfg.merge_x_overlap_min,
+        vertical_gap_px=cfg.merge_vertical_gap_px,
+    )
+
+    for (bx, by, bw, bh), area in merged:
+        merged_bbox_area = float(max(1, bw * bh))
+        merged_is_giant = (
+            merged_bbox_area > max_bbox_area
+            or bw > max_bbox_w
+            or bh > max_bbox_h
+        )
+        merged_near_camera = (by + bh) >= near_bottom_y
+        if merged_is_giant and not merged_near_camera:
             continue
 
         full_bx = bx
@@ -342,6 +464,9 @@ def detect_obstacles(
         cy = float(full_by + bh / 2)
 
         fill_ratio = area / float(bw * bh) if (bw * bh) > 0 else 0.0
+        fill_ratio = max(0.0, min(1.0, fill_ratio))
+        if merged_is_giant and fill_ratio < 0.25:
+            continue
         norm_area = min(1.0, area / max(1.0, max_area))
         confidence = 0.5 * fill_ratio + 0.5 * norm_area
         confidence = max(0.0, min(1.0, confidence))
@@ -364,4 +489,112 @@ def detect_obstacles(
             frame_idx=frame_idx,
         ))
 
+    if len(results) > cfg.max_detections:
+        # Keep the strongest obstacles and drop tiny clutter.
+        results.sort(key=lambda o: (o.confidence, o.area), reverse=True)
+        results = results[:cfg.max_detections]
+
     return results
+
+
+def _bbox_iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    ax2, ay2 = ax + aw, ay + ah
+    bx2, by2 = bx + bw, by + bh
+
+    ix1 = max(ax, bx)
+    iy1 = max(ay, by)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    if inter <= 0:
+        return 0.0
+    union = aw * ah + bw * bh - inter
+    return float(inter / union) if union > 0 else 0.0
+
+
+def _bbox_union(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> Tuple[int, int, int, int]:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    x1 = min(ax, bx)
+    y1 = min(ay, by)
+    x2 = max(ax + aw, bx + bw)
+    y2 = max(ay + ah, by + bh)
+    return (x1, y1, x2 - x1, y2 - y1)
+
+
+def _bbox_gap(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> Tuple[int, int]:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    ax2, ay2 = ax + aw, ay + ah
+    bx2, by2 = bx + bw, by + bh
+    gap_x = max(0, max(ax, bx) - min(ax2, bx2))
+    gap_y = max(0, max(ay, by) - min(ay2, by2))
+    return gap_x, gap_y
+
+
+def _bbox_x_overlap_ratio(
+    a: Tuple[int, int, int, int],
+    b: Tuple[int, int, int, int],
+) -> float:
+    ax, _ay, aw, _ah = a
+    bx, _by, bw, _bh = b
+    ax2 = ax + aw
+    bx2 = bx + bw
+    inter = max(0, min(ax2, bx2) - max(ax, bx))
+    denom = float(max(1, min(aw, bw)))
+    return float(inter) / denom
+
+
+def _merge_candidate_boxes(
+    candidates: List[Tuple[Tuple[int, int, int, int], float]],
+    *,
+    iou_thr: float,
+    gap_px: int,
+    x_overlap_thr: float,
+    vertical_gap_px: int,
+) -> List[Tuple[Tuple[int, int, int, int], float]]:
+    if not candidates:
+        return []
+
+    merged = candidates[:]
+    changed = True
+    while changed:
+        changed = False
+        out: List[Tuple[Tuple[int, int, int, int], float]] = []
+        used = [False] * len(merged)
+
+        for i in range(len(merged)):
+            if used[i]:
+                continue
+            box_i, area_i = merged[i]
+            cur_box = box_i
+            cur_area = area_i
+            used[i] = True
+
+            for j in range(i + 1, len(merged)):
+                if used[j]:
+                    continue
+                box_j, area_j = merged[j]
+                iou = _bbox_iou(cur_box, box_j)
+                gx, gy = _bbox_gap(cur_box, box_j)
+                x_ov = _bbox_x_overlap_ratio(cur_box, box_j)
+                # Merge when highly overlapping, very close, or vertically stacked
+                # with substantial x-overlap (head/body or split vehicle blob).
+                should_merge = (
+                    iou >= iou_thr
+                    or (gx <= gap_px and gy <= gap_px)
+                    or (gx <= gap_px and gy <= vertical_gap_px and x_ov >= x_overlap_thr)
+                )
+                if should_merge:
+                    cur_box = _bbox_union(cur_box, box_j)
+                    cur_area = cur_area + area_j
+                    used[j] = True
+                    changed = True
+
+            out.append((cur_box, cur_area))
+
+        merged = out
+
+    return merged

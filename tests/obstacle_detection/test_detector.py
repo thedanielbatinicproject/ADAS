@@ -11,6 +11,7 @@ from adas.obstacle_detection.detector import (
     DetectorConfig,
     detect_obstacles,
     DEFAULT_DETECTOR_CONFIG,
+    _merge_candidate_boxes,
 )
 from adas.obstacle_detection.tracking import SimpleTracker, _iou
 
@@ -131,9 +132,26 @@ class TestIoU:
 
 class TestSimpleTracker:
     def test_empty_detections_return_empty(self):
-        t = SimpleTracker()
+        t = SimpleTracker(coast_frames=0)
         result = t.update([])
         assert result == []
+
+    def test_track_is_kept_for_short_dropouts(self):
+        t = SimpleTracker(max_missing=5, coast_frames=2)
+        det = [DetectedObject(bbox=(40, 40, 30, 30), centroid=(55.0, 55.0), confidence=0.9)]
+        first = t.update(det)
+        tid = first[0].track_id
+
+        dropped_1 = t.update([])
+        dropped_2 = t.update([])
+        dropped_3 = t.update([])
+
+        assert len(dropped_1) == 1
+        assert dropped_1[0].track_id == tid
+        assert len(dropped_2) == 1
+        assert dropped_2[0].track_id == tid
+        assert dropped_2[0].confidence <= dropped_1[0].confidence
+        assert dropped_3 == []
 
     def test_new_detections_get_ids(self):
         t = SimpleTracker()
@@ -176,3 +194,34 @@ class TestSimpleTracker:
             t.update([])
         # Track should be pruned
         assert len(t._tracks) == 0
+
+
+class TestCandidateMerging:
+    def test_vertical_stack_boxes_are_merged(self):
+        # Simulates split person detection: head + body fragments.
+        candidates = [
+            ((100, 80, 40, 25), 700.0),
+            ((102, 108, 42, 55), 1800.0),
+        ]
+        merged = _merge_candidate_boxes(
+            candidates,
+            iou_thr=0.10,
+            gap_px=20,
+            x_overlap_thr=0.45,
+            vertical_gap_px=60,
+        )
+        assert len(merged) == 1
+
+    def test_far_apart_boxes_not_merged(self):
+        candidates = [
+            ((20, 40, 30, 40), 900.0),
+            ((220, 140, 35, 45), 1200.0),
+        ]
+        merged = _merge_candidate_boxes(
+            candidates,
+            iou_thr=0.10,
+            gap_px=20,
+            x_overlap_thr=0.45,
+            vertical_gap_px=60,
+        )
+        assert len(merged) == 2

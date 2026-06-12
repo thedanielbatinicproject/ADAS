@@ -45,34 +45,52 @@ def run_scenario(config: ScenarioConfig, *, log_file: Optional[str] = None) -> N
     from adas.collision_risk.decision import decide
     from adas.collision_risk.types import SystemAction
 
-    # ---- Load record from index ----
-    record = _load_record(config)
-    if record is None:
-        print(
-            f"[ERROR] No record found for category_id={config.category_id}, "
-            f"video_id={config.video_id} in {config.index_path}"
-        )
-        return
+    # ---- Load record from index (or use image_dir override) ----
+    if config.image_dir:
+        # Custom video: frames already extracted to image_dir, skip DB lookup.
+        frame_source_path = _resolve_frame_source_path(config.image_dir)
+        n_frames = 0
+        annotation = None
+        log_event(ScenarioEvent(
+            event_type=EventType.VIDEO_START,
+            frame_idx=0,
+            timestamp_s=0.0,
+            details={
+                "category_id": "INPUT_OVERRIDE",
+                "video_id": "INPUT_OVERRIDE",
+                "n_frames": n_frames,
+                "path": config.image_dir,
+                "frame_source": frame_source_path,
+            },
+        ), log_file=log_file)
+    else:
+        record = _load_record(config)
+        if record is None:
+            print(
+                f"[ERROR] No record found for category_id={config.category_id}, "
+                f"video_id={config.video_id} in {config.index_path}"
+            )
+            return
 
-    record_path = record["path"]
-    frame_source_path = _resolve_frame_source_path(record_path)
-    n_frames = int(record.get("n_frames") or 0)
+        record_path = record["path"]
+        frame_source_path = _resolve_frame_source_path(record_path)
+        n_frames = int(record.get("n_frames") or 0)
 
-    # ---- Load annotation ----
-    annotation = _load_annotation(config)
+        # ---- Load annotation ----
+        annotation = _load_annotation(config)
 
-    log_event(ScenarioEvent(
-        event_type=EventType.VIDEO_START,
-        frame_idx=0,
-        timestamp_s=0.0,
-        details={
-            "category_id": config.category_id,
-            "video_id": config.video_id,
-            "n_frames": n_frames,
-            "path": record_path,
-            "frame_source": frame_source_path,
-        },
-    ), log_file=log_file)
+        log_event(ScenarioEvent(
+            event_type=EventType.VIDEO_START,
+            frame_idx=0,
+            timestamp_s=0.0,
+            details={
+                "category_id": config.category_id,
+                "video_id": config.video_id,
+                "n_frames": n_frames,
+                "path": record_path,
+                "frame_source": frame_source_path,
+            },
+        ), log_file=log_file)
 
     # ---- Frame iterator ----
     frame_iter = _iter_frames_lazy(frame_source_path, parser)
@@ -94,7 +112,7 @@ def run_scenario(config: ScenarioConfig, *, log_file: Optional[str] = None) -> N
         _img = parser.get_frame(_fr)
         if _img is not None:
             _frame_cache[_ci] = _img
-        if (_ci + 1) % 50 == 0 or _ci + 1 == n_frames:
+        if (_ci + 1) % 100 == 0 or _ci + 1 == n_frames:
             _pct = 100.0 * (_ci + 1) / n_frames
             print(
                 f"\r[cache] Loading frames: {_ci + 1}/{n_frames} ({_pct:.0f}%)",
@@ -124,7 +142,11 @@ def run_scenario(config: ScenarioConfig, *, log_file: Optional[str] = None) -> N
     # ---- UI setup ----
     player = None
     _use_native_stats = False
-    win_title = f"ADAS | cat={config.category_id} vid={config.video_id}"
+    win_title = (
+        "ADAS | INPUT OVERRIDE"
+        if config.image_dir
+        else f"ADAS | cat={config.category_id} vid={config.video_id}"
+    )
     if config.ui_backend == "dpg":
         from adas.ui.backend_dpg import DpgPlayer
         from adas.ui.types import UIState
@@ -153,6 +175,10 @@ def run_scenario(config: ScenarioConfig, *, log_file: Optional[str] = None) -> N
     last_warn_frame = -999
     last_brake_frame = -999
     warn_cooldown = 30  # frames between audio alerts
+    stable_action = SystemAction.NONE
+    pending_action = SystemAction.NONE
+    pending_count = 0
+    stable_intensity = 0.0
 
     # ---- Main loop ----
     frame_count = 0
@@ -160,11 +186,24 @@ def run_scenario(config: ScenarioConfig, *, log_file: Optional[str] = None) -> N
 
     cursor = 0
     last_cursor = n_frames - 1
+    prev_cursor = -1
     _ctx_service_stopped = False
 
     while 0 <= cursor <= last_cursor:
         if config.max_frames is not None and frame_count >= config.max_frames:
             break
+
+        # Reset stateful components when cursor jumps backward (seek/rewind).
+        if cursor < prev_cursor:
+            lane_processor.reset()
+            detector.reset()
+            tracker.reset()
+            risk_estimator.reset()
+            stable_action = SystemAction.NONE
+            pending_action = SystemAction.NONE
+            pending_count = 0
+            stable_intensity = 0.0
+        prev_cursor = cursor
 
         frame_idx, frame_ref = frame_items[cursor]
 
@@ -213,7 +252,29 @@ def run_scenario(config: ScenarioConfig, *, log_file: Optional[str] = None) -> N
         risks = risk_estimator.estimate_risk(
             tracked, lane_output=lane_output, context_state=ctx_state, frame_idx=frame_idx
         )
-        action, intensity = decide(risks, context_state=ctx_state)
+        raw_action, raw_intensity = decide(risks, context_state=ctx_state)
+
+        # Temporal hysteresis for action output to reduce jitter/beep spam.
+        if raw_action == stable_action:
+            pending_action = raw_action
+            pending_count = 0
+            stable_intensity = max(0.0, min(1.0, 0.7 * stable_intensity + 0.3 * raw_intensity))
+            action = stable_action
+            intensity = stable_intensity
+        else:
+            if raw_action == pending_action:
+                pending_count += 1
+            else:
+                pending_action = raw_action
+                pending_count = 1
+
+            needed = 2 if raw_action != SystemAction.NONE else 4
+            if pending_count >= needed:
+                stable_action = raw_action
+                stable_intensity = raw_intensity
+                pending_count = 0
+            action = stable_action
+            intensity = stable_intensity
 
         # ---- Audio ----
         if config.enable_audio:

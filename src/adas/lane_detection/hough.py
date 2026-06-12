@@ -65,6 +65,17 @@ class HoughLaneConfig:
     right_corridor_min: float = 0.40
     right_corridor_max: float = 1.00
 
+    # ---- Road-prior geometry gate ----
+    # Expected lane positions from perspective model (fractions of frame width).
+    expected_left_bottom_frac: float = 0.24
+    expected_right_bottom_frac: float = 0.76
+    expected_left_top_frac: float = 0.42
+    expected_right_top_frac: float = 0.58
+    # Segment must have at least one endpoint below this ROI fraction.
+    min_seg_bottom_y_frac: float = 0.45
+    # Allowed deviation from expected lane x-position (fraction of frame width).
+    lane_gate_frac: float = 0.35
+
     # ---- RANSAC polynomial fitting ----
     ransac_n_iter: int = 20
     ransac_inlier_threshold_px: float = 6.0
@@ -73,20 +84,20 @@ class HoughLaneConfig:
 
     # ---- Confidence scoring ----
     # Inlier count that maps to confidence = 1.0 (soft cap via saturation).
-    confidence_inlier_norm: float = 30.0
+    confidence_inlier_norm: float = 14.0
     # Innovation-based penalty: large Kalman corrections reduce confidence.
     # Penalty = exp(-innovation / confidence_innovation_scale).
     confidence_innovation_scale: float = 80.0
 
     # ---- Kalman filter ----
-    kf_process_noise: float = 0.05   # Q diagonal scale
-    kf_meas_noise: float = 12.0      # R diagonal scale
+    kf_process_noise: float = 0.02   # Q diagonal scale
+    kf_meas_noise: float = 18.0      # R diagonal scale
     # After this many consecutive frames without a measurement update, reset the KF.
     kf_lost_frames_max: int = 15
     # Innovation gate: if the RANSAC bottom-x deviates more than this from the
     # KF prediction, reject that measurement (keeps the filter clean).
     # Set to 0 to disable.
-    kf_max_innovation_px: float = 50.0
+    kf_max_innovation_px: float = 35.0
 
     # ---- Polynomial sanity checks ----
     # Reject quadratic fits with |a| above this threshold.  Dashcam lane lines
@@ -107,41 +118,30 @@ class HoughLaneConfig:
 # ---------------------------------------------------------------------------
 
 class PolyKalmanFilter:
-    """6D Kalman filter tracking quadratic lane polynomial x = a*y² + b*y + c.
+    """Drift-safe 3D Kalman filter for quadratic lane polynomial x = a*y² + b*y + c.
 
-    State vector: [a, b, c, da, db, dc] where da/db/dc are per-frame velocities
-    of the respective polynomial coefficients.  This gives the filter a first-
-    order motion model so it can predict where a lane will be even when the
-    measurement is temporarily missing (occlusion, shadow, dashed markings).
+    State vector is [a, b, c] only.  We intentionally avoid per-coefficient
+    velocity terms because they can introduce artificial drift in stationary
+    scenes (dashcam and lane markings static, but tracked lines keep moving).
     """
 
     def __init__(self, process_noise: float = 0.05, meas_noise: float = 20.0) -> None:
         self._pn = process_noise
         self._mn = meas_noise
 
-        # State: [a, b, c, da, db, dc]
-        self._x = np.zeros(6, dtype=np.float64)
+        # State: [a, b, c]
+        self._x = np.zeros(3, dtype=np.float64)
         # Covariance (start with large uncertainty)
-        self._P = np.eye(6, dtype=np.float64) * 1000.0
+        self._P = np.eye(3, dtype=np.float64) * 1000.0
 
-        # State transition: x_{k+1} = F @ x_k
-        self._F = np.array([
-            [1, 0, 0, 1, 0, 0],
-            [0, 1, 0, 0, 1, 0],
-            [0, 0, 1, 0, 0, 1],
-            [0, 0, 0, 1, 0, 0],
-            [0, 0, 0, 0, 1, 0],
-            [0, 0, 0, 0, 0, 1],
-        ], dtype=np.float64)
+        # State transition: stationary model x_{k+1} = x_k
+        self._F = np.eye(3, dtype=np.float64)
 
-        # Measurement matrix: observe [a, b, c] only
-        self._H = np.zeros((3, 6), dtype=np.float64)
-        self._H[0, 0] = 1.0
-        self._H[1, 1] = 1.0
-        self._H[2, 2] = 1.0
+        # Measurement matrix: directly observe [a, b, c]
+        self._H = np.eye(3, dtype=np.float64)
 
         # Process noise covariance
-        self._Q = np.eye(6, dtype=np.float64) * process_noise
+        self._Q = np.eye(3, dtype=np.float64) * process_noise
 
         # Measurement noise covariance
         self._R = np.eye(3, dtype=np.float64) * meas_noise
@@ -178,8 +178,7 @@ class PolyKalmanFilter:
 
         if not self._initialized:
             # First measurement: initialize directly
-            self._x[0:3] = z
-            self._x[3:6] = 0.0
+            self._x[:] = z
             np.fill_diagonal(self._P, 100.0)
             self._initialized = True
             self._lost_frames = 0
@@ -198,7 +197,7 @@ class PolyKalmanFilter:
 
         # State + covariance update
         self._x = self._x + K @ y_inn
-        I_KH = np.eye(6, dtype=np.float64) - K @ self._H
+        I_KH = np.eye(3, dtype=np.float64) - K @ self._H
         self._P = I_KH @ self._P
 
         self._lost_frames = 0
@@ -228,10 +227,15 @@ class LaneTracker:
         _cfg = cfg or HoughLaneConfig()
         self.left_kf = PolyKalmanFilter(_cfg.kf_process_noise, _cfg.kf_meas_noise)
         self.right_kf = PolyKalmanFilter(_cfg.kf_process_noise, _cfg.kf_meas_noise)
+        # Per-frame movement tracking for anti-teleport clamp
+        self.left_last_bx: float = -1.0
+        self.right_last_bx: float = -1.0
 
     def reset(self) -> None:
         self.left_kf.reset()
         self.right_kf.reset()
+        self.left_last_bx = -1.0
+        self.right_last_bx = -1.0
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +378,8 @@ def _classify_segments(
     right_min = w * cfg.right_corridor_min
     right_max = w * cfg.right_corridor_max
     min_cy = roi_h * 0.15  # ignore segments in the very top (sky)
+    min_bottom_y = roi_h * cfg.min_seg_bottom_y_frac
+    gate_px = w * cfg.lane_gate_frac
 
     for x1, y1, x2, y2 in segs:
         dx = x2 - x1
@@ -391,10 +397,26 @@ def _classify_segments(
         if cy < min_cy:
             continue
 
+        # Road-prior: keep only segments that extend sufficiently low into ROI.
+        if max(y1, y2) < min_bottom_y:
+            continue
+
+        # Evaluate expected lane x near the lower endpoint where perspective
+        # constraints are strongest.
+        if y1 >= y2:
+            y_ref = float(y1)
+            x_ref = float(x1)
+        else:
+            y_ref = float(y2)
+            x_ref = float(x2)
+
+        exp_left = _expected_lane_x(roi_h, w, y_ref, left=True, cfg=cfg)
+        exp_right = _expected_lane_x(roi_h, w, y_ref, left=False, cfg=cfg)
+
         # Classify by slope sign and corridor
-        if slope < 0 and left_min <= cx <= left_max:
+        if slope < 0 and left_min <= cx <= left_max and abs(x_ref - exp_left) <= gate_px:
             left_segs.append((x1, y1, x2, y2))
-        elif slope > 0 and right_min <= cx <= right_max:
+        elif slope > 0 and right_min <= cx <= right_max and abs(x_ref - exp_right) <= gate_px:
             right_segs.append((x1, y1, x2, y2))
 
     return left_segs, right_segs
@@ -517,6 +539,26 @@ def _poly_eval_3(poly: Tuple[float, float, float], y: float) -> float:
     return poly[0] * y * y + poly[1] * y + poly[2]
 
 
+def _expected_lane_x(
+    roi_h: int,
+    w: int,
+    y: float,
+    *,
+    left: bool,
+    cfg: HoughLaneConfig,
+) -> float:
+    if roi_h <= 1:
+        return w * (cfg.expected_left_bottom_frac if left else cfg.expected_right_bottom_frac)
+    t = max(0.0, min(1.0, y / float(roi_h - 1)))
+    if left:
+        top = w * cfg.expected_left_top_frac
+        bot = w * cfg.expected_left_bottom_frac
+    else:
+        top = w * cfg.expected_right_top_frac
+        bot = w * cfg.expected_right_bottom_frac
+    return top + (bot - top) * t
+
+
 def _segs_to_points(
     segs: List[Tuple[int, int, int, int]],
 ) -> List[Tuple[float, float]]:
@@ -629,23 +671,23 @@ def detect_lanes_hough(
         _cfg.poly_max_quad_coeff,
     )
 
-    # Corridor check: reject only if the poly is clearly on the WRONG side of
-    # the image (i.e., a "left" poly that ends up in the right quarter, or a
-    # "right" poly that ends up in the left quarter).  Evaluated at roi_h-1;
-    # uses loose bounds so near-camera lanes far from center are not discarded.
+    # Corridor check: left lane must end up left of centre,
+    # right lane must end up right of centre. Both must be within the frame
+    # (not vanishing to the very edge, which indicates a degenerate fit).
     if left_raw is not None:
         left_bx = _poly_eval_3(left_raw, float(roi_h - 1))
-        if left_bx >= w * 0.75:
+        if left_bx >= w * 0.72 or left_bx < -w * 0.10:
             left_raw, left_inliers = None, 0
     if right_raw is not None:
         right_bx = _poly_eval_3(right_raw, float(roi_h - 1))
-        if right_bx <= w * 0.25:
+        if right_bx <= w * 0.28 or right_bx > w * 1.10:
             right_raw, right_inliers = None, 0
 
     # ---- 7. Kalman predict → update -----------------------------------------
     def _kf_step(
         kf: Optional[PolyKalmanFilter],
         raw_poly: Optional[Tuple[float, ...]],
+        raw_inliers: int,
         lost_max: int,
     ) -> Optional[Tuple[float, float, float]]:
         if kf is None:
@@ -654,9 +696,11 @@ def detect_lanes_hough(
             return None
         kf.predict()
         if raw_poly is not None and len(raw_poly) >= 3:
-            # Innovation gating: reject RANSAC measurements that deviate too far
-            # from the current KF prediction at the bottom of the ROI.
-            # This prevents a single noisy frame from jerking the tracked line.
+            # Innovation gating:
+            # - Small innovation  (<= max_inn): accept normally
+            # - Large innovation  (> max_inn but <= 3×): reject — noise spike
+            # - Very large innovation (> 3×): KF has locked onto the WRONG feature
+            #   (e.g. guardrail instead of lane). Reset and accept the new measurement.
             accept = True
             max_inn = _cfg.kf_max_innovation_px
             if max_inn > 0 and kf.is_initialized and roi_h > 1:
@@ -667,17 +711,155 @@ def detect_lanes_hough(
                     raw_bx = (float(raw_poly[0]) * y_bot * y_bot
                               + float(raw_poly[1]) * y_bot
                               + float(raw_poly[2]))
-                    if abs(raw_bx - pred_bx) > max_inn:
+                    inn = abs(raw_bx - pred_bx)
+                    if inn > max_inn * 3.0:
+                        # Filter has drifted far from RANSAC — reset and accept new
+                        kf.reset()
+                    elif inn > max_inn:
                         accept = False
             if accept:
                 kf.update((float(raw_poly[0]), float(raw_poly[1]), float(raw_poly[2])))
         if kf.lost_frames > lost_max:
             kf.reset()
             return None
-        return kf.get()
+        est = kf.get()
+        if est is None:
+            return None
 
-    left_smoothed = _kf_step(left_kf, left_raw, _cfg.kf_lost_frames_max)
-    right_smoothed = _kf_step(right_kf, right_raw, _cfg.kf_lost_frames_max)
+        # Adaptive follow: keep anti-drift behavior, but follow the road faster
+        # when we have enough inliers and a clear measurement shift.
+        if raw_poly is not None and len(raw_poly) >= 3:
+            raw3 = (float(raw_poly[0]), float(raw_poly[1]), float(raw_poly[2]))
+            y_bot = float(max(1, roi_h - 1))
+            est_bx = _poly_eval_3(est, y_bot)
+            raw_bx = _poly_eval_3(raw3, y_bot)
+            shift = abs(raw_bx - est_bx)
+
+            # More inliers and larger shift -> follow faster.
+            follow = 0.15
+            if raw_inliers >= 8:
+                follow = 0.22
+            if raw_inliers >= 12:
+                follow = 0.30
+            if shift > 20:
+                follow += 0.06
+            if shift > 40:
+                follow += 0.06
+            follow = max(0.10, min(0.40, follow))  # reduced from 0.70
+
+            est = (
+                (1.0 - follow) * est[0] + follow * raw3[0],
+                (1.0 - follow) * est[1] + follow * raw3[1],
+                (1.0 - follow) * est[2] + follow * raw3[2],
+            )
+
+        return est
+
+    left_smoothed = _kf_step(left_kf, left_raw, left_inliers, _cfg.kf_lost_frames_max)
+    right_smoothed = _kf_step(right_kf, right_raw, right_inliers, _cfg.kf_lost_frames_max)
+
+    # ---- 7b. Post-KF geometry sanity check ---------------------------------
+    # If a smoothed poly puts the lane line on the WRONG SIDE of the frame,
+    # the KF has drifted onto guardrail / noise. Reset it.
+    # Bounds allow partial off-screen lines (near-camera wide lanes).
+    if left_smoothed is not None:
+        lbx = _poly_eval_3(left_smoothed, float(roi_h - 1))
+        if lbx > w * 0.70:   # left line drifted to right half
+            if left_kf is not None:
+                left_kf.reset()
+            left_smoothed = None
+            left_inliers = 0
+
+    if right_smoothed is not None:
+        rbx = _poly_eval_3(right_smoothed, float(roi_h - 1))
+        if rbx < w * 0.30:   # right line drifted to left half
+            if right_kf is not None:
+                right_kf.reset()
+            right_smoothed = None
+            right_inliers = 0
+
+    # Crossed lanes: one is definitely wrong — reset lower-confidence side.
+    if left_smoothed is not None and right_smoothed is not None:
+        lbx = _poly_eval_3(left_smoothed, float(roi_h - 1))
+        rbx = _poly_eval_3(right_smoothed, float(roi_h - 1))
+        lane_w = rbx - lbx
+        # Crossed OR impossibly wide (>85% frame) OR impossibly narrow (<20%)
+        bad_width = (lane_w <= 0) or (lane_w > w * 0.85) or (lane_w < w * 0.20)
+        if bad_width:
+            exp_lbx = w * 0.24
+            exp_rbx = w * 0.76
+            if abs(lbx - exp_lbx) <= abs(rbx - exp_rbx):
+                # right side is more deviated
+                if right_kf is not None:
+                    right_kf.reset()
+                right_smoothed = None
+                right_inliers = 0
+                if tracker is not None:
+                    tracker.right_last_bx = -1.0
+            else:
+                if left_kf is not None:
+                    left_kf.reset()
+                left_smoothed = None
+                left_inliers = 0
+                if tracker is not None:
+                    tracker.left_last_bx = -1.0
+
+    # ---- 7c. Slope direction validity ------------------------------------------
+    # In dashcam perspective: left line dx/dy < 0 (goes left as y increases),
+    # right line dx/dy > 0. A nearly vertical line (slope ≈ 0) is always noise.
+    # Threshold -0.25/+0.25: any real lane line in perspective moves ≥0.25 px/py.
+    if left_smoothed is not None:
+        slope_bot = 2.0 * left_smoothed[0] * (roi_h - 1) + left_smoothed[1]
+        if slope_bot > -0.25:  # should be clearly negative for left line
+            if left_kf is not None:
+                left_kf.reset()
+            left_smoothed = None
+            left_inliers = 0
+
+    if right_smoothed is not None:
+        slope_bot = 2.0 * right_smoothed[0] * (roi_h - 1) + right_smoothed[1]
+        if slope_bot < 0.25:  # should be clearly positive for right line
+            if right_kf is not None:
+                right_kf.reset()
+            right_smoothed = None
+            right_inliers = 0
+
+    # ---- 7d. Per-frame movement clamp (anti-teleport) --------------------------
+    # Limit how many pixels the line can jump between consecutive frames.
+    # Adjusting only the c-coefficient keeps the slope intact.
+    _max_move = 25.0
+    _max_move_confident = 50.0
+
+    if tracker is not None and left_smoothed is not None and tracker.left_last_bx > 0:
+        lbx = _poly_eval_3(left_smoothed, float(roi_h - 1))
+        delta = lbx - tracker.left_last_bx
+        limit = 15.0  # px/frame — tight enough to prevent single-frame teleport
+        if abs(delta) > limit:
+            direction = 1.0 if delta > 0 else -1.0
+            new_bx = tracker.left_last_bx + limit * direction
+            left_smoothed = (left_smoothed[0], left_smoothed[1],
+                             left_smoothed[2] + (new_bx - lbx))
+
+    if tracker is not None and right_smoothed is not None and tracker.right_last_bx > 0:
+        rbx = _poly_eval_3(right_smoothed, float(roi_h - 1))
+        delta = rbx - tracker.right_last_bx
+        limit = 15.0
+        if abs(delta) > limit:
+            direction = 1.0 if delta > 0 else -1.0
+            new_bx = tracker.right_last_bx + limit * direction
+            right_smoothed = (right_smoothed[0], right_smoothed[1],
+                              right_smoothed[2] + (new_bx - rbx))
+
+    # Update last_bx for next frame
+    if tracker is not None:
+        tracker.left_last_bx = (
+            _poly_eval_3(left_smoothed, float(roi_h - 1))
+            if left_smoothed is not None else -1.0
+        )
+        tracker.right_last_bx = (
+            _poly_eval_3(right_smoothed, float(roi_h - 1))
+            if right_smoothed is not None else -1.0
+        )
 
     # ---- 8. Confidence scoring ----------------------------------------------
     def _score(inliers: int, kf: Optional[PolyKalmanFilter]) -> float:
