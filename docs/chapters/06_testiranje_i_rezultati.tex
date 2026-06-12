@@ -1,11 +1,116 @@
 % !TeX root = ../main.tex
 \chapter{Testiranje i rezultati}
 
-\section{Scenariji testiranja}
-Placeholder tekst.
+U ovom poglavlju opisani su pristupi testiranju sustava, organizacija testnih slučajeva i rezultati koji su dobiveni izvođenjem scenarija. Testiranje je podijeljeno u dvije razine: automatizirani unit testovi koji provjeravaju ispravnost pojedinih modula u izolaciji, te integracijski scenariji koji provjeravaju ponašanje cijelog pipelinea na stvarnim video zapisima iz DADA-2000 skupa. Naglasak nije samo na tome je li sustav ispravno implementiran, nego i na tome ponaša li se predvidljivo u uvjetima koji se razlikuju od idealnih.
 
-\section{Metrike}
-Placeholder tekst.
+\section{Automatizirani testovi kontekstnih modula}
+
+Testovi kontekstnog paketa jedini su u projektu koji su dovoljno sofisticirani da provjere funkcionalnu ispravnost modula pomoću anotiranih sintetičkih ulaza, a ne samo odsustvo iznimki ili konzistentnost tipova. Pristup je sljedeći: budući da DADA-2000 anotacije eksplicitno opisuju uvjete scene (\textit{weather}, \textit{light}), moguće je za svaki uvjet unaprijed znati koji je ispravan izlaz modula. Sintetički okviri se tada generiraju sukladno tim uvjetima i uspoređuju s očekivanim ishodom.
+
+Konkretno, \texttt{conftest.py} u direktoriju \texttt{tests/context/} definira skup pytest \textit{fixture-a}: crni okvir koji simulira noćnu vožnju, bijeli okvir koji simulira jakog odsjaja, sivi uniformni okvir, gradijentni okvir za umjerenu vidljivost te nasumično šumni okvir za degradirane uvjete. Svaki od ovih okvira odgovara jednoj od kategorija uvjeta koje su anotacijski opisane u datasetu. Tester koji piše test za detekciju kiše, na primjer, zna da mokra scena mora rezultirati klasifikacijom \texttt{RoadSurface.WET} i \texttt{braking\_multiplier}-om većim od $1{,}0$ te da okvir s tamnom i neoštrom teksturom asfaltirane podloge to mora pouzdano pokrenuti.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.90\linewidth]{test_context_results.png}
+    \caption{Rezultati pytest izvođenja testova paketa \texttt{context}: prolaz pojedinih slučajeva za detekciju noći, odsjaja, mokre i šljunčane podloge te promjene moda.}
+    \label{fig:test_context_results}
+\end{figure}
+
+Na isti način rade testovi za detekciju noći: tester zna da ako je 25. percentil svjetline ispod praga 55, sustav mora klasificirati scenu kao noćnu, pa se crni sintetički okvir koristi kao ulaz koji mora zadovoljiti taj uvjet. Testovi za kontekstni router provjeravaju histerezni mehanizam: mod se ne smije promijeniti na temelju jednog okvira, nego tek nakon $k = 5$ uzastopnih konzistentnih procjena. Ovakav pristup čini testove kontekstnog paketa jedinom skupinom testova u projektu gdje test sam po sebi ne može proći slučajno ili bez stvarnog razumijevanja semantike modula.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.85\linewidth]{test_anotacija_primjer.png}
+    \caption{Primjer okvira iz DADA-2000 koji ima anotacijske podatke poput rednog broja sličice u kojoj je započela nesreća.}
+    \label{fig:test_anotacija}
+\end{figure}
+
+\section{Funkcionalni testovi ostalih modula}
+
+Za razliku od kontekstnih testova, testovi ostalih modula nisu toliko sofisticirani u smislu validacije semantičkog ishoda. Njihova primarna svrha je osigurati da moduli ne pucaju, da vraćaju ispravne tipove i da se ponašaju konzistentno pri očekivanim rubnim uvjetima. Takav pristup opravdan je činjenicom da su moduli poput detekcije traka i prepreka inherentno vizualni i stohastički te njihova ispravnost nije jednoznačno definirana jednim brojem ili klasom.
+
+Testovi paketa \texttt{lane\_detection} provjeravaju da \texttt{LaneProcessor.update()} na sintetičkim okvirima vraća \texttt{LaneOutput} objekt s ispravnim atributima, te da CLAHE grana preprocesiranja ne baca iznimke ni u degradiranom modu. \texttt{metrics.py} u istom paketu provjerava da \texttt{evaluate\_detection()} ispravno računa standardne mjere na parovima referentnih i detektiranih linija. Testovi paketa \texttt{obstacle\_detection} na sličan način provjeravaju da \texttt{Detector.detect()} vraća listu objekata i da \texttt{SimpleTracker.update()} ispravno dodjeljuje i zadržava identifikatore između uzastopnih poziva. Test modula \texttt{scenario} koristi \texttt{unittest.mock} za zamjenu svega što zahtijeva GUI ili dataset, čime provjerava logiku konfiguracije i događaja bez pokretanja stvarnog videa.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\linewidth]{ci_pytest_summary.png}
+    \caption{GitHub Actions sažetak izvođenja cijelog skupa testova: broj prolaznih, neuspješnih i preskočenih testova po modulu.}
+    \label{fig:ci_pytest_summary}
+\end{figure}
+
+\section{Debug vizualizacija modula}
+
+Osim automatiziranih testova, projekt uključuje skripte za vizualnu inspekciju pojedinih modula koje su korištene za ručno podešavanje parametara i potvrdu ispravnosti detekcije na stvarnim okvirima. Ove skripte ne ulaze u pytest suite, ali su neizostavan alat pri razvoju jer omogućuju neposrednu povratnu informaciju o ponašanju algoritma na konkretnoj sceni.
+
+Skripta \texttt{debug\_lanes.py} prikazuje međukorake obrade detekcije traka za odabrani video zapis: originalni okvir, Canny rubnu mapu, ROI masku i konačne ucrtane polinome trake. Na taj se način vizualno može provjeriti utječe li promjena parametara (prag Canny detektora, ROI granice, Houghov prag) na kvalitetu detekcije u određenoj sceni.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\linewidth]{debug_lanes_normalan.png}
+    \caption{Debug prikaz detekcije traka u normalnim uvjetima: Canny rubna mapa, detektirani Houghovi segmenti i ucrtani polinomi lijeve i desne trake u okviru.}
+    \label{fig:debug_lanes_normalan}
+\end{figure}
+
+U degradiranom modu razlika u preprocesiranju vidljiva je i vizualno: CLAHE ekvilizacija i bilateralni filtar produciraju rubnu mapu koja je jasno drugačija od one dobivene standardnim Gaussovim zamućenjem, što je posebno izraženo na okvirima s mokrom cestom ili slabijim kontrastom.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\linewidth]{debug_lanes_degradiran.png}
+    \caption{Debug prikaz detekcije traka u degradiranom modu (mokra cesta, slab kontrast): aktivirano CLAHE preprocesiranje i bilateralni filtar u usporedbi sa standardnim putem.}
+    \label{fig:debug_lanes_degradiran}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\linewidth]{canny_debug.png}
+    \caption{Višepanelni prikaz međukoraka Canny detekcije: originalni okvir, pretvorba u sivine, Gaussovo zaglađivanje, rubna mapa i konačna ROI maska.}
+    \label{fig:canny_debug}
+\end{figure}
+
+Skripta \texttt{debug\_obstacles.py} na analogan način prikazuje samo rezultate detekcije i praćenja prepreka, s ucrtanim omeđujućim pravokutnicima i identifikatorima praćenih objekata. Opcijskim argumentom \texttt{--with-lanes} moguće je dodati i prikaz traka, što olakšava provjeru lateralne logike (je li objekt unutar ego-trake ili izvan nje).
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\linewidth]{debug_obstacles.png}
+    \caption{Debug prikaz detekcije i praćenja prepreka s ucrtanim omeđujućim pravokutnicima i identifikatorima objekata; lateralni položaj u odnosu na ego-traku prikazan je bojom obruba.}
+    \label{fig:debug_obstacles}
+\end{figure}
+
+\section{Integracijski scenariji}
+
+Integracijski scenariji pokreću se naredbom \texttt{run\_scenario.py} i izvršavaju cijeli pipeline nad odabranim video zapisom iz DADA-2000 indeksa. Za svaki okvir redom se izvršavaju kontekstna analiza, detekcija traka, detekcija i praćenje prepreka, procjena rizika i logika odlučivanja, a rezultati se ucrtavaju u player prozor. Svi značajni događaji (promjena moda, WARN, BRAKE) bilježe se u JSONL log datoteku za kasniju analizu.
+
+Scenarij u normalnim dnevnim uvjetima s jasno vidljivim trakama aktivira \textit{normal\_marked} mod i pokazuje stabilan rad svih modula: trake se prate glatko kroz okvire, prepreke dobivaju konzistentne identifikatore, a risk score ostaje nizak dok nema objekta u ego-traci. U takvim uvjetima WARN upozorenje aktivira se samo kada se vozilo ispred dovoljno primakne, što je vidljivo promjenom boje omeđujućeg pravokutnika iz zelene u žutu.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\linewidth]{scenario_warn.png}
+    \caption{Player prozor s aktivnim WARN upozorenjem: žuti omeđujući pravokutnik, prikazana vrijednost risk score i TTC, ucrtane trake i informacijska traka s trenutnim modom sustava.}
+    \label{fig:scenario_warn}
+\end{figure}
+
+Scenarij s bliskim sudarom prikazuje aktivaciju BRAKE akcije: objekt unutar ego-trake s TTC vrijednošću ispod $1{,}5$~s neovisno o iznosu risk score-a prelazi prag za BRAKE, što je vidljivo crvenim omeđujućim pravokutnikom i ispisom akcije u informacijskoj traci.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\linewidth]{scenario_brake.png}
+    \caption{Player prozor s aktivnom BRAKE akcijom: crveni omeđujući pravokutnik, objekt klasificiran kao unutar ego-trake, visok risk score i TTC ispod kritičnog praga od $1{,}5$~s.}
+    \label{fig:scenario_brake}
+\end{figure}
+
+Noćni scenarij aktivira drugačije kontekstno stanje nego dnevni. Sustav detektira noćne uvjete i prilagođava MOG2 prag kako bi zadržao osjetljivost na objekte pri slabom osvjetljenju. Detekcija traka u noćnim uvjetima može biti manje stabilna zbog slabijeg kontrasta oznaka, što je reflektirano u smanjenom \textit{lane confidence} i mogućoj aktivaciji \textit{degraded\_marked} moda.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\linewidth]{scenario_noc.png}
+    \caption{Player prozor u noćnom scenariju: prilagođeno kontekstno stanje, smanjen kontrast traka i povećana osjetljivost detekcije prepreka vidljivi su u informacijskoj traci i iznosu \textit{lane confidence}.}
+    \label{fig:scenario_noc}
+\end{figure}
 
 \section{Analiza rezultata}
-Placeholder tekst.
+
+Rezultati integracijskog testiranja pokazuju da sustav funkcionira predvidljivo u uvjetima za koje je kalibriran, ali i da deterministički pristup ima jasno ograničene domene pouzdanosti. Kontekstno usmjeravanje pokazalo se ključnim za stabilnost u varijabilnim uvjetima: bez histereznog mehanizma mod bi se često oscilirao između susjednih kategorija što bi destabiliziralo parametre detekcije. S mehanizmom od $k = 5$ okvira takvo titranje praktično nestaje.
+
+Detekcija traka stabilna je u normalnim dnevnim uvjetima s jasnim oznakama, dok u urbanim scenarijima s raskrižjima, kratkim isprekidanim oznakama i sjenkama pokazuje povremene ispade koji se oporavljaju kroz polinomsko prigušivanje prema prethodnom stanju. Detekcija prepreka temeljena na MOG2-u osjetljiva je na kvalitetu modela pozadine: u prvim okvirima videa model pozadine još nije stabilan pa se pojavljuju lažne detekcije koje SimpleTracker filtrira kroz zahtjev za minimalnim brojem okvira prisutnosti. Na mokroj podlozi ili u kiši odsjaj asfalta može generirati dodatni šum u prednjem planu koji morfološke operacije ne uspijevaju uvijek potpuno ukloniti.
+
+Procjena rizika i logika odlučivanja ponašaju se konzistentno sa specifikacijom: WARN i BRAKE akcije aktiviraju se prema očekivanim pragovima, a prilagodba na temelju \textit{braking\_multiplier} vidljiva je u ranijem aktiviranju na scenarijima označenim kišom ili vlažnom podlogom. Ukupan dojam je da sustav nije precizan mjerač fizikalnih veličina, nego heuristički orijentiran mehanizam koji donosi konzervativne odluke temeljene na relativnoj promjeni situacije, što je primjereno determinističkom pristupu bez dubinskog senzora.

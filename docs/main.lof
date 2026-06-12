@@ -16,4 +16,14 @@
 \contentsline {figure}{\numberline {5.6}{\ignorespaces Kartica Configurator s live pregledom okvira i numeričkim statusom sustava.}}{35}{figure.5.6}%
 \contentsline {figure}{\numberline {5.7}{\ignorespaces Kartica Runtime Overrides za podešavanje parametara sustava bez ponovnog pokretanja.}}{36}{figure.5.7}%
 \addvspace {10\p@ }
+\contentsline {figure}{\numberline {6.1}{\ignorespaces Rezultati pytest izvođenja testova paketa \texttt {context}: prolaz pojedinih slučajeva za detekciju noći, odsjaja, mokre i šljunčane podloge te promjene moda.}}{39}{figure.6.1}%
+\contentsline {figure}{\numberline {6.2}{\ignorespaces Primjer okvira iz DADA-2000 koji ima anotacijske podatke poput rednog broja sličice u kojoj je započela nesreća.}}{40}{figure.6.2}%
+\contentsline {figure}{\numberline {6.3}{\ignorespaces GitHub Actions sažetak izvođenja cijelog skupa testova: broj prolaznih, neuspješnih i preskočenih testova po modulu.}}{41}{figure.6.3}%
+\contentsline {figure}{\numberline {6.4}{\ignorespaces Debug prikaz detekcije traka u normalnim uvjetima: Canny rubna mapa, detektirani Houghovi segmenti i ucrtani polinomi lijeve i desne trake u okviru.}}{42}{figure.6.4}%
+\contentsline {figure}{\numberline {6.5}{\ignorespaces Debug prikaz detekcije traka u degradiranom modu (mokra cesta, slab kontrast): aktivirano CLAHE preprocesiranje i bilateralni filtar u usporedbi sa standardnim putem.}}{42}{figure.6.5}%
+\contentsline {figure}{\numberline {6.6}{\ignorespaces Višepanelni prikaz međukoraka Canny detekcije: originalni okvir, pretvorba u sivine, Gaussovo zaglađivanje, rubna mapa i konačna ROI maska.}}{43}{figure.6.6}%
+\contentsline {figure}{\numberline {6.7}{\ignorespaces Debug prikaz detekcije i praćenja prepreka s ucrtanim omeđujućim pravokutnicima i identifikatorima objekata; lateralni položaj u odnosu na ego-traku prikazan je bojom obruba.}}{43}{figure.6.7}%
+\contentsline {figure}{\numberline {6.8}{\ignorespaces Player prozor s aktivnim WARN upozorenjem: žuti omeđujući pravokutnik, prikazana vrijednost risk score i TTC, ucrtane trake i informacijska traka s trenutnim modom sustava.}}{44}{figure.6.8}%
+\contentsline {figure}{\numberline {6.9}{\ignorespaces Player prozor s aktivnom BRAKE akcijom: crveni omeđujući pravokutnik, objekt klasificiran kao unutar ego-trake, visok risk score i TTC ispod kritičnog praga od $1{,}5$~s.}}{45}{figure.6.9}%
+\contentsline {figure}{\numberline {6.10}{\ignorespaces Player prozor u noćnom scenariju: prilagođeno kontekstno stanje, smanjen kontrast traka i povećana osjetljivost detekcije prepreka vidljivi su u informacijskoj traci i iznosu \textit {lane confidence}.}}{46}{figure.6.10}%
 \addvspace {10\p@ }

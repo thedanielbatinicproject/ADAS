@@ -74,7 +74,7 @@ class HoughLaneConfig:
     # Segment must have at least one endpoint below this ROI fraction.
     min_seg_bottom_y_frac: float = 0.45
     # Allowed deviation from expected lane x-position (fraction of frame width).
-    lane_gate_frac: float = 0.35
+    lane_gate_frac: float = 0.32  # slightly tighter than 0.35 to reduce adjacent-lane noise
 
     # ---- RANSAC polynomial fitting ----
     ransac_n_iter: int = 20
@@ -255,6 +255,9 @@ class HoughLaneResult:
     vp_x: float = 0.0
     vp_y: float = 0.0
     used_sliding_window: bool = False
+    # ROI-relative y where left and right polys intersect (vanishing point).
+    # None when lines don't converge within the ROI.
+    convergence_y_roi: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -671,16 +674,15 @@ def detect_lanes_hough(
         _cfg.poly_max_quad_coeff,
     )
 
-    # Corridor check: left lane must end up left of centre,
-    # right lane must end up right of centre. Both must be within the frame
-    # (not vanishing to the very edge, which indicates a degenerate fit).
+    # Corridor check
     if left_raw is not None:
         left_bx = _poly_eval_3(left_raw, float(roi_h - 1))
         if left_bx >= w * 0.72 or left_bx < -w * 0.10:
             left_raw, left_inliers = None, 0
     if right_raw is not None:
         right_bx = _poly_eval_3(right_raw, float(roi_h - 1))
-        if right_bx <= w * 0.28 or right_bx > w * 1.10:
+        # Reject adjacent-lane line: real adjacent lane appears at >97% frame width
+        if right_bx <= w * 0.28 or right_bx > w * 0.97:
             right_raw, right_inliers = None, 0
 
     # ---- 7. Kalman predict → update -----------------------------------------
@@ -830,25 +832,42 @@ def detect_lanes_hough(
     _max_move = 25.0
     _max_move_confident = 50.0
 
-    if tracker is not None and left_smoothed is not None and tracker.left_last_bx > 0:
+    if tracker is not None and left_smoothed is not None:
         lbx = _poly_eval_3(left_smoothed, float(roi_h - 1))
-        delta = lbx - tracker.left_last_bx
-        limit = 15.0  # px/frame — tight enough to prevent single-frame teleport
-        if abs(delta) > limit:
-            direction = 1.0 if delta > 0 else -1.0
-            new_bx = tracker.left_last_bx + limit * direction
+        if tracker.left_last_bx > 0:
+            delta = lbx - tracker.left_last_bx
+            abs_d = abs(delta)
+            # Adaptive EMA: small adjustments smooth heavily; large confirmed
+            # movements (many inliers) allow fast tracking; single-frame spikes
+            # with low inlier count are heavily damped.
+            if abs_d <= 8.0:
+                alpha = 0.50   # tiny jitter: blend quickly
+            elif abs_d <= 25.0:
+                alpha = 0.65   # normal correction
+            elif left_inliers >= 8:
+                alpha = 0.80   # confirmed real lane change: fast but smooth
+            else:
+                alpha = 0.20   # large jump, low confidence: noise, suppress
+            smooth_bx = alpha * lbx + (1.0 - alpha) * tracker.left_last_bx
             left_smoothed = (left_smoothed[0], left_smoothed[1],
-                             left_smoothed[2] + (new_bx - lbx))
+                             left_smoothed[2] + (smooth_bx - lbx))
 
-    if tracker is not None and right_smoothed is not None and tracker.right_last_bx > 0:
+    if tracker is not None and right_smoothed is not None:
         rbx = _poly_eval_3(right_smoothed, float(roi_h - 1))
-        delta = rbx - tracker.right_last_bx
-        limit = 15.0
-        if abs(delta) > limit:
-            direction = 1.0 if delta > 0 else -1.0
-            new_bx = tracker.right_last_bx + limit * direction
+        if tracker.right_last_bx > 0:
+            delta = rbx - tracker.right_last_bx
+            abs_d = abs(delta)
+            if abs_d <= 8.0:
+                alpha = 0.50
+            elif abs_d <= 25.0:
+                alpha = 0.65
+            elif right_inliers >= 8:
+                alpha = 0.80
+            else:
+                alpha = 0.20
+            smooth_rbx = alpha * rbx + (1.0 - alpha) * tracker.right_last_bx
             right_smoothed = (right_smoothed[0], right_smoothed[1],
-                              right_smoothed[2] + (new_bx - rbx))
+                              right_smoothed[2] + (smooth_rbx - rbx))
 
     # Update last_bx for next frame
     if tracker is not None:
@@ -880,6 +899,29 @@ def detect_lanes_hough(
     if right_raw is None and right_smoothed is not None:
         right_conf = max(0.0, 0.4 - 0.05 * (right_kf.lost_frames if right_kf else 0))
 
+    # ---- 9. Convergence point (VP from polys) --------------------------------
+    # Find ROI-relative y where left and right polys intersect.
+    # Drawing clips at this y so lines don't cross into "negative space" above VP.
+    convergence_y_roi: Optional[int] = None
+    if left_smoothed is not None and right_smoothed is not None:
+        da = left_smoothed[0] - right_smoothed[0]
+        db = left_smoothed[1] - right_smoothed[1]
+        dc = left_smoothed[2] - right_smoothed[2]
+        if abs(da) < 1e-9:
+            # Effectively linear
+            if abs(db) > 1e-6:
+                y_int = -dc / db
+                if 0 <= y_int < roi_h * 0.65:
+                    convergence_y_roi = int(max(0, y_int))
+        else:
+            disc = db * db - 4.0 * da * dc
+            if disc >= 0:
+                for y_sol in [(-db + math.sqrt(disc)) / (2.0 * da),
+                               (-db - math.sqrt(disc)) / (2.0 * da)]:
+                    if 0 <= y_sol < roi_h * 0.65:
+                        if convergence_y_roi is None or y_sol < convergence_y_roi:
+                            convergence_y_roi = int(max(0, y_sol))
+
     return HoughLaneResult(
         left_poly=left_smoothed,
         right_poly=right_smoothed,
@@ -890,5 +932,6 @@ def detect_lanes_hough(
         vp_x=vp_x,
         vp_y=vp_y,
         used_sliding_window=used_sw,
+        convergence_y_roi=convergence_y_roi,
     )
 

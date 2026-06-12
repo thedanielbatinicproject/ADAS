@@ -2,10 +2,13 @@
 \chapter{Zaključak}
 
 \section{Diskusija}
-Placeholder tekst.
+
+Ovaj rad pokazuje da je moguće izgraditi funkcionalan i modularan ADAS prototip koji se u cijelosti oslanja na klasične metode obrade slike bez ikakvog dubokog učenja. Kontekstno usmjeravanje dokazalo se ključnom komponentom koja sustavu daje sposobnost prilagodbe parametara prema trenutnoj kvaliteti scene, umjesto forsiranja jedne fiksne konfiguracije kroz sve scenarije. Deterministički pipeline olakšava razumijevanje svakog koraka odlučivanja i čini sustav predvidljivim i ponovljivim, što je u inženjerskom i edukacijskom kontekstu jednako važno kao i sama točnost rezultata.
 
 \section{Ograničenja}
-Placeholder tekst.
+
+Najveće ograničenje sustava je ovisnost o jednoj prednjoj kameri bez podataka o apsolutnoj brzini, dubini ili vanjskim senzorima, zbog čega su sve procjene udaljenosti i TTC temeljene na heuristikama koje nisu apsolutno pouzdane. Detekcija traka je osjetljiva na nestandardne oznake, raskrižja i intenzivne atmosferske uvjete, a MOG2-bazirana detekcija prepreka zahtijeva stabilnu pozadinu što u prvim okvirima scenarija nije zajamčeno. Kontekstni moduli kalibrirani su prema karakteristikama DADA-2000 snimki dash kamere niske rezolucije i mogu zahtijevati rekalibraciju za drugačije vrste kamera.
 
 \section{Budući rad}
-Placeholder tekst.
+
+Najprirodniji pravac razvoja je zamjena pojedinih klasičnih modula naprednijim rješenjima, primjerice uvođenje lakih neuronskih mreža za segmentaciju traka ili detekciju objekata uz zadržavanje kontekstnog i risk modula koji su neovisni o načinu percepcije. Uz to, integracija dodatnih senzorskih izvora poput odometrijskog signala ili GPS podataka o brzini značajno bi poboljšala točnost TTC procjene. Na razini testiranja, kontekstualni pristup automatiziranim testovima koji je primijenjen za paket \texttt{context} mogao bi se proširiti na module detekcije traka i prepreka kroz bogatiji skup sintetičkih scena, čime bi pokrivenost testova bila puno veća od trenutne.

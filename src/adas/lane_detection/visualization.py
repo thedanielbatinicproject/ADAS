@@ -65,7 +65,16 @@ def draw_lanes(
     y2 = lane_output.roi_y2
     roi_h = y2 - y1
 
-    ys = np.linspace(0, roi_h - 1, num=max(roi_h, 2))
+    # Clip drawing at vanishing point: lines above VP have no physical meaning.
+    vp_y = getattr(lane_output, 'vanishing_y', None)
+    if vp_y is not None:
+        draw_y1_full = int(max(y1, vp_y))
+        draw_roi_start = draw_y1_full - y1  # ROI-relative clipping start
+    else:
+        draw_y1_full = y1
+        draw_roi_start = 0
+
+    ys = np.linspace(max(0, draw_roi_start), roi_h - 1, num=max(roi_h - draw_roi_start, 2))
 
     # Draw filled region when both boundaries are available
     if (

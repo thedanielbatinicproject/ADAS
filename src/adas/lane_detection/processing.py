@@ -99,6 +99,10 @@ class LaneOutput:
     roi_y2: int = 0
     lane_width_px: Optional[float] = None
     is_trapezoid: bool = False
+    # Full-frame y coordinate where left/right polys converge (vanishing point).
+    # Drawing clips lane lines at this y so they don't extend above the VP.
+    # None means no convergence within the visible ROI.
+    vanishing_y: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -192,12 +196,17 @@ class LaneProcessor:
         self._prev_stable_output: Optional[LaneOutput] = None
         self._hold_remaining: int = 0
         self._max_hold_frames: int = 1  # reduced: holding wrong KF output for 3 frames causes visible drift
+        # Hood detection: scan first N frames for stable horizontal edge at bottom
+        self._hood_warmup_rows: list = []
+        self._hood_warmup_done: bool = False
 
     def reset(self) -> None:
         """Reset temporal state (call when switching videos)."""
         self._tracker.reset()
         self._prev_stable_output = None
         self._hold_remaining = 0
+        self._hood_warmup_rows = []
+        self._hood_warmup_done = False
 
     def update_config(self, config: LaneProcessingConfig) -> None:
         self._config = config
@@ -211,6 +220,10 @@ class LaneProcessor:
         context_state: Any = None,
     ) -> LaneOutput:
         """Process one frame with temporal smoothing applied."""
+        # Hood detection warmup: run once over first 25 frames to auto-set roi_bottom
+        if not self._hood_warmup_done:
+            self._run_hood_warmup(frame)
+
         raw = process_frame(
             frame, context_state, config=self._config, tracker=self._tracker
         )
@@ -246,6 +259,45 @@ class LaneProcessor:
             )
 
         return raw
+
+    def _run_hood_warmup(self, frame: Any) -> None:
+        """Detect a stable horizontal edge near the bottom (hood of the car).
+        Once found, adjusts roi_bottom so the hood is excluded from detection.
+        Runs for the first 25 frames then marks itself done.
+        """
+        import cv2
+        if frame is None or not hasattr(frame, 'shape'):
+            return
+        h, w = frame.shape[:2]
+        # Only look at bottom 25% of frame
+        start = int(h * 0.75)
+        roi = frame[start:, :]
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        # Row variance: hood rows are uniform color (very low variance)
+        row_var = gray.var(axis=1).astype(float)  # shape: (roi_rows,)
+        self._hood_warmup_rows.append(row_var)
+
+        if len(self._hood_warmup_rows) >= 25:
+            import numpy as _np
+            stacked = _np.stack(self._hood_warmup_rows, axis=0)  # (N, rows)
+            mean_var = stacked.mean(axis=0)
+            std_var  = stacked.std(axis=0)
+            # Stable low-variance row = hood
+            hood_threshold = max(15.0, mean_var.min() * 3.0)
+            stable_low = (mean_var < hood_threshold) & (std_var < 20.0)
+            if stable_low.any():
+                # Topmost stable-low row in local coords
+                hood_y_local = int(_np.argmax(stable_low))
+                hood_y_full = start + hood_y_local
+                frac = hood_y_full / float(h)
+                # Only apply if clearly in bottom 22% and above current roi_bottom
+                if 0.75 < frac < self._config.roi_bottom - 0.03:
+                    from dataclasses import replace as _replace
+                    new_bottom = round(frac - 0.01, 3)
+                    self._config = _replace(self._config, roi_bottom=new_bottom)
+                    self._tracker = LaneTracker(_adapt_config(self._config))
+            self._hood_warmup_done = True
+            self._hood_warmup_rows.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -297,9 +349,9 @@ def process_frame(
     weather_str = _get_weather_str(context_state)
     light_str = _get_light_str(context_state)
 
-    # Strategy: no lane markings expected -> synthetic trapezoid
+    # Strategy: no lane markings expected -> synthetic trapezoid with clean geometry
     if mode_str in ("unmarked_good_vis", "unmarked_degraded"):
-        return _build_trapezoid(h, w, y1, y2, cfg, mode_str=mode_str)
+        return _build_trapezoid(h, w, y1, y2, cfg, mode_str=mode_str, use_clean_geometry=True)
 
     # Strategy: degraded conditions -> adapted preprocessing
     use_degraded = (
@@ -414,6 +466,11 @@ def process_frame(
         roi_h, w, left_poly, right_poly, left_detected, right_detected
     )
 
+    # Compute full-frame vanishing y from poly convergence (ROI-relative -> full frame)
+    vanishing_y: Optional[int] = None
+    if hough_result.convergence_y_roi is not None:
+        vanishing_y = y1 + hough_result.convergence_y_roi
+
     return LaneOutput(
         has_lanes=has_lanes,
         lane_confidence=lane_confidence,
@@ -429,6 +486,7 @@ def process_frame(
         roi_y2=y2,
         lane_width_px=lane_width_px,
         is_trapezoid=False,
+        vanishing_y=vanishing_y,
     )
 
 
@@ -612,31 +670,34 @@ def _build_trapezoid(
     edges: Any = None,
     left_hint: Optional[Tuple[float, ...]] = None,
     right_hint: Optional[Tuple[float, ...]] = None,
+    use_clean_geometry: bool = False,
 ) -> LaneOutput:
-    """Build a perspective-adaptive forward-road area.
-
-    This fallback guarantees that the ego vehicle always has a plausible
-    road surface directly in front, even when line extraction fails.
-    """
+    """Build a perspective-adaptive forward-road area."""
     import cv2
 
     roi_h = y2 - y1
-    geom = _estimate_road_geometry(
-        h,
-        w,
-        y1,
-        y2,
-        cfg,
-        edges=edges,
-        left_hint=left_hint,
-        right_hint=right_hint,
-    )
-    bx_l = geom["bx_l"]
-    bx_r = geom["bx_r"]
-    tx_l = geom["tx_l"]
-    tx_r = geom["tx_r"]
-    top_y_roi = geom["top_y_roi"]
-    bot_y_roi = roi_h - 1
+
+    if use_clean_geometry:
+        # For unmarked modes: use symmetric, mathematically correct perspective.
+        # Skip edge-adaptive estimation which produces asymmetric trapezoids.
+        center = w / 2.0
+        bot_half = w * 0.42     # half-width at bottom (near hood) ≈ 84% of frame
+        top_half = w * 0.10     # half-width at top (horizon) ≈ 20% of frame
+        top_y_roi = max(1, int(roi_h * 0.08))  # close to horizon
+        bot_y_roi = roi_h - 1
+        bx_l = int(center - bot_half); bx_r = int(center + bot_half)
+        tx_l = int(center - top_half); tx_r = int(center + top_half)
+        geom = {"bx_l": bx_l, "bx_r": bx_r, "tx_l": tx_l, "tx_r": tx_r,
+                "top_y_roi": top_y_roi, "curve_bias": 0.0}
+    else:
+        geom = _estimate_road_geometry(
+            h, w, y1, y2, cfg,
+            edges=edges, left_hint=left_hint, right_hint=right_hint,
+        )
+        bot_y_roi = roi_h - 1
+        top_y_roi = geom["top_y_roi"]
+        bx_l = geom["bx_l"]; bx_r = geom["bx_r"]
+        tx_l = geom["tx_l"]; tx_r = geom["tx_r"]
 
     left_poly = _poly_from_three_points(
         float(top_y_roi),

@@ -78,8 +78,8 @@ class DetectorConfig:
 
     roi_top: float = 0.30
     roi_bottom: float = 0.90
-    min_area: float = 280.0
-    max_area_fraction: float = 0.25
+    min_area: float = 200.0   # lowered: allow smaller fragments
+    max_area_fraction: float = 0.30  # raised: large nearby vehicles need this
     max_aspect_ratio: float = 6.0
     min_aspect_ratio: float = 0.2
     mog2_history: int = 300
@@ -99,11 +99,16 @@ class DetectorConfig:
     min_lane_overlap: float = 0.05
     min_lane_mask_coverage: float = 0.02
     merge_iou_threshold: float = 0.10
-    merge_gap_px: int = 20
+    merge_gap_px: int = 8   # reduced from 20 — prevents car+vegetation merge
     merge_x_overlap_min: float = 0.45
-    merge_vertical_gap_px: int = 60
-    min_fill_ratio: float = 0.10
-    min_solidity: float = 0.12
+    merge_vertical_gap_px: int = 40  # reduced from 60
+    # Max allowed width of a merged candidate (fraction of frame width).
+    # Blobs wider than this are almost always background clutter merges.
+    max_merged_width_fraction: float = 0.38  # tighter: genuine vehicles rarely exceed 38%
+    # Tail-light vehicle detection (works even at same speed as ego)
+    use_tail_light_detection: bool = True
+    min_fill_ratio: float = 0.08   # lowered: cars at same speed have sparse FG mask
+    min_solidity: float = 0.10
     max_detections: int = 20
     # Suppress detections while MOG2 background model is building up.
     # During these frames MOG2 is still updated but outputs are discarded.
@@ -187,6 +192,9 @@ class Detector:
         self._config = config or DEFAULT_DETECTOR_CONFIG
         self._bg_subtractor: Any = None
         self._frame_idx = 0
+        self._prev_gray: Any = None  # for frame-differencing
+        from .tail_lights import TailLightConfig
+        self._tail_cfg = TailLightConfig()
         self._init_bg_subtractor()
 
     def _init_bg_subtractor(self) -> None:
@@ -204,6 +212,7 @@ class Detector:
     def reset(self) -> None:
         """Reset the background model (call when switching videos)."""
         self._frame_idx = 0
+        self._prev_gray = None
         self._init_bg_subtractor()
 
     def update_config(self, config: DetectorConfig) -> None:
@@ -236,6 +245,22 @@ class Detector:
         # Derive a per-frame config based on context
         effective_cfg = _config_for_context(self._config, context_state)
 
+        # Build a frame-diff mask to catch vehicles moving at similar speed to ego.
+        # MOG2 misses those because relative motion is near zero.
+        try:
+            import cv2 as _cv2
+            import numpy as _np
+            _gray = _cv2.cvtColor(frame, _cv2.COLOR_BGR2GRAY)
+            if self._prev_gray is not None and self._prev_gray.shape == _gray.shape:
+                _diff = _cv2.absdiff(_gray, self._prev_gray)
+                _prev_gray_store = _gray
+            else:
+                _diff = None
+                _prev_gray_store = _gray
+            self._prev_gray = _prev_gray_store
+        except Exception:
+            _diff = None
+
         result = detect_obstacles(
             frame,
             lane_output=lane_output,
@@ -243,12 +268,28 @@ class Detector:
             bg_subtractor=self._bg_subtractor,
             frame_idx=self._frame_idx,
             config=effective_cfg,
+            frame_diff=_diff,
         )
         self._frame_idx += 1
         # While MOG2 is still building its background model the foreground mask
         # contains almost everything.  Suppress output until warmup is done.
         if self._frame_idx <= effective_cfg.warmup_frames:
             return []
+
+        # --- Tail-light vehicle detection (orthogonal to MOG2) ---
+        if effective_cfg.use_tail_light_detection and frame is not None:
+            from .tail_lights import detect_tail_light_vehicles
+            h_f = frame.shape[0]
+            tl_y1 = int(h_f * self._tail_cfg.roi_top)
+            tl_y2 = int(h_f * self._tail_cfg.roi_bottom)
+            tail_dets = detect_tail_light_vehicles(
+                frame, tl_y1, tl_y2, self._tail_cfg, self._frame_idx
+            )
+            if tail_dets:
+                # Merge with MOG2 results: add tail-light detections that don't
+                # overlap significantly with existing detections.
+                result = _merge_tail_lights(result, tail_dets)
+
         return result
 
 
@@ -263,6 +304,7 @@ def detect_obstacles(
     bg_subtractor: Any = None,
     frame_idx: int = -1,
     config: Optional[DetectorConfig] = None,
+    frame_diff: Any = None,  # optional grayscale abs-diff for slow-vehicle detection
 ) -> List[DetectedObject]:
     """Detect moving obstacles in a dashcam frame (functional API).
 
@@ -318,6 +360,17 @@ def detect_obstacles(
 
     fg_thr = int(max(80, min(240, cfg.foreground_threshold)))
     _, fg_mask = cv2.threshold(fg_mask, fg_thr, 255, cv2.THRESH_BINARY)
+
+    # Combine MOG2 with inter-frame differencing to catch vehicles at similar speed.
+    # Frame diff is computed on full frame; we crop to ROI and threshold it.
+    if frame_diff is not None and hasattr(frame_diff, 'shape'):
+        try:
+            diff_roi = frame_diff[y1:y2, :]
+            if diff_roi.shape[:2] == fg_mask.shape[:2]:
+                _, diff_bin = cv2.threshold(diff_roi, 20, 255, cv2.THRESH_BINARY)
+                fg_mask = cv2.bitwise_or(fg_mask, diff_bin)
+        except Exception:
+            pass
 
     kernel_size = max(1, cfg.morph_kernel_size)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
@@ -429,12 +482,15 @@ def detect_obstacles(
             lane_y = full_cy - lane_roi_y1_geo
             lane_roi_h_geo = max(1, lane_roi_y2_geo - lane_roi_y1_geo)
             if 0 <= lane_y <= lane_roi_h_geo:
-                lp = lane_output.left_poly
-                rp = lane_output.right_poly
-                left_x = lp[0] * lane_y**2 + lp[1] * lane_y + lp[2]
-                right_x = rp[0] * lane_y**2 + rp[1] * lane_y + rp[2]
-                margin = 70.0  # px: allow objects partially overlapping lane edge
-                if full_cx < left_x - margin or full_cx > right_x + margin:
+                lp_poly = lane_output.left_poly
+                rp_poly = lane_output.right_poly
+                left_x  = lp_poly[0] * lane_y**2 + lp_poly[1] * lane_y + lp_poly[2]
+                right_x = rp_poly[0] * lane_y**2 + rp_poly[1] * lane_y + rp_poly[2]
+                lane_w  = max(1.0, right_x - left_x)
+                # Hard exclude: far-side vegetation/guardrails only
+                # Allow 1.5 lane widths beyond each side so adjacent-lane cars pass
+                exclude_margin = lane_w * 1.5
+                if full_cx < left_x - exclude_margin or full_cx > right_x + exclude_margin:
                     continue
 
         candidates.append(((bx, by, bw, bh), area))
@@ -448,6 +504,9 @@ def detect_obstacles(
     )
 
     for (bx, by, bw, bh), area in merged:
+        # Reject merged blobs that are too wide to be a single real object.
+        if bw > int(w * cfg.max_merged_width_fraction):
+            continue
         merged_bbox_area = float(max(1, bw * bh))
         merged_is_giant = (
             merged_bbox_area > max_bbox_area
@@ -495,6 +554,42 @@ def detect_obstacles(
         results = results[:cfg.max_detections]
 
     return results
+
+
+def _merge_tail_lights(
+    mog2_dets: List[DetectedObject],
+    tail_dets: List[DetectedObject],
+    iou_threshold: float = 0.25,
+) -> List[DetectedObject]:
+    """Add tail-light detections to the MOG2 result list.
+
+    A tail-light detection is added only if it does not substantially overlap
+    an existing MOG2 detection (to avoid duplicating the same vehicle).
+    If it overlaps, the tail-light bbox is used to refine the MOG2 one when
+    the tail-light confidence is higher.
+    """
+    result = list(mog2_dets)
+    for td in tail_dets:
+        overlaps = False
+        for i, md in enumerate(result):
+            iou = _bbox_iou(td.bbox, md.bbox)
+            if iou > iou_threshold:
+                overlaps = True
+                # Prefer the higher-confidence detection
+                if td.confidence > md.confidence:
+                    result[i] = DetectedObject(
+                        bbox=td.bbox,
+                        area=td.area,
+                        centroid=td.centroid,
+                        track_id=md.track_id,
+                        distance_estimate=td.distance_estimate,
+                        confidence=td.confidence,
+                        frame_idx=td.frame_idx,
+                    )
+                break
+        if not overlaps:
+            result.append(td)
+    return result
 
 
 def _bbox_iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
