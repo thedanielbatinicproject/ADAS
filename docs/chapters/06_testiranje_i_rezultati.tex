@@ -80,12 +80,12 @@ Skripta \texttt{debug\_obstacles.py} na analogan način prikazuje samo rezultate
 
 Integracijski scenariji pokreću se naredbom \texttt{run\_scenario.py} i izvršavaju cijeli pipeline nad odabranim video zapisom iz DADA-2000 indeksa. Za svaki okvir redom se izvršavaju kontekstna analiza, detekcija traka, detekcija i praćenje prepreka, procjena rizika i logika odlučivanja, a rezultati se ucrtavaju u player prozor. Svi značajni događaji (promjena moda, WARN, BRAKE) bilježe se u JSONL log datoteku za kasniju analizu.
 
-Scenarij u normalnim dnevnim uvjetima s jasno vidljivim trakama aktivira \textit{normal\_marked} mod i pokazuje stabilan rad svih modula: trake se prate glatko kroz okvire, prepreke dobivaju konzistentne identifikatore, a risk score ostaje nizak dok nema objekta u ego-traci. U takvim uvjetima WARN upozorenje aktivira se samo kada se vozilo ispred dovoljno primakne, što je vidljivo promjenom boje omeđujućeg pravokutnika iz zelene u žutu.
+Scenarij u normalnim dnevnim uvjetima s jasno vidljivim trakama aktivira \textit{normal\_marked} mod i pokazuje stabilan rad svih modula: trake se prate glatko kroz okvire, prepreke dobivaju konzistentne identifikatore, a risk score ostaje nizak dok nema objekta u ego-traci. U takvim uvjetima WARN upozorenje aktivira se samo kada se vozilo ispred dovoljno primakne, što je vidljivo promjenom teksta \texttt{Action} u GUI-u iz \textit{none} u \textit{WARN}.
 
 \begin{figure}[H]
     \centering
     \includegraphics[width=0.95\linewidth]{scenario_warn.png}
-    \caption{Player prozor s aktivnim WARN upozorenjem: žuti omeđujući pravokutnik, prikazana vrijednost risk score i TTC, ucrtane trake i informacijska traka s trenutnim modom sustava.}
+    \caption{Player prozor s aktivnim WARN upozorenjem: omeđujući žuti pravokutnik, prikazana vrijednost risk score i TTC, ucrtane trake i informacijska traka s trenutnim modom sustava.}
     \label{fig:scenario_warn}
 \end{figure}
 
@@ -94,7 +94,7 @@ Scenarij s bliskim sudarom prikazuje aktivaciju BRAKE akcije: objekt unutar ego-
 \begin{figure}[H]
     \centering
     \includegraphics[width=0.95\linewidth]{scenario_brake.png}
-    \caption{Player prozor s aktivnom BRAKE akcijom: crveni omeđujući pravokutnik, objekt klasificiran kao unutar ego-trake, visok risk score i TTC ispod kritičnog praga od $1{,}5$~s.}
+    \caption{Player prozor s aktivnom BRAKE akcijom (iako je sama opcija isključena pa piše samo WARN): crveni omeđujući pravokutnik, objekt/i klasificiran kao unutar ego-trake, visok risk score i TTC ispod kritičnog praga od $1{,}5$~s.}
     \label{fig:scenario_brake}
 \end{figure}
 
@@ -102,8 +102,8 @@ Noćni scenarij aktivira drugačije kontekstno stanje nego dnevni. Sustav detekt
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.95\linewidth]{scenario_noc.png}
-    \caption{Player prozor u noćnom scenariju: prilagođeno kontekstno stanje, smanjen kontrast traka i povećana osjetljivost detekcije prepreka vidljivi su u informacijskoj traci i iznosu \textit{lane confidence}.}
+    \includegraphics[width=0.95\linewidth]{brake_noc.png}
+    \caption{Player prozor u noćnom scenariju: prilagođeno kontekstno stanje, smanjen kontrast traka i povećana osjetljivost detekcije.}
     \label{fig:scenario_noc}
 \end{figure}
 
